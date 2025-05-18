@@ -620,8 +620,12 @@ class NetworkUtils(private val context: Context) {
                 return getInternalUrl()
             }
             
+            // Clean up SSID (Android sometimes adds quotes) for reliable matching
+            val cleanSsid = ssid.trim().removeSurrounding("\"")
+            Log.d(TAG, "Cleaned SSID: $cleanSsid")
+            
             // Check against home networks list
-            val isInHomeList = isNetworkInHomeList(ssid)
+            val isInHomeList = isNetworkInHomeList(cleanSsid)
             if (isInHomeList) {
                 Log.d(TAG, "SSID matches home network, using internal URL")
                 return getInternalUrl()
@@ -660,9 +664,18 @@ class NetworkUtils(private val context: Context) {
      */
     private fun isNetworkInHomeList(ssid: String): Boolean {
         val homeNetworks = getHomeNetworks()
-        return homeNetworks.any { 
-            it.trim().removeSurrounding("\"").equals(ssid.trim().removeSurrounding("\""), ignoreCase = true) 
+        Log.d(TAG, "Checking SSID '$ssid' against home networks: ${homeNetworks.joinToString(", ") { "'$it'" }}")
+        
+        val result = homeNetworks.any { homeNetwork -> 
+            val cleanHomeNetwork = homeNetwork.trim().removeSurrounding("\"")
+            val cleanSsid = ssid.trim().removeSurrounding("\"")
+            val matches = cleanHomeNetwork.equals(cleanSsid, ignoreCase = true)
+            Log.d(TAG, "Comparing '$cleanHomeNetwork' with '$cleanSsid': $matches")
+            matches
         }
+        
+        Log.d(TAG, "SSID '$ssid' is in home networks: $result")
+        return result
     }
     
     /**
@@ -701,8 +714,11 @@ class NetworkUtils(private val context: Context) {
             return true
         }
         
+        // Clean up SSID (Android sometimes adds quotes) for reliable matching
+        val cleanSsid = ssid.trim().removeSurrounding("\"")
+        
         // Check against home networks
-        return isNetworkInHomeList(ssid)
+        return isNetworkInHomeList(cleanSsid)
     }
     
     /**
