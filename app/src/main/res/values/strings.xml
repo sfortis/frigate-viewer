@@ -1,0 +1,48 @@
+<resources>
+    <string name="app_name">Frigate Viewer</string>
+    <string name="navigation_drawer_open">Open navigation drawer</string>
+    <string name="navigation_drawer_close">Close navigation drawer</string>
+    <string name="nav_header_title">Frigate Viewer</string>
+    <string name="nav_header_subtitle">Frigate network-aware viewer</string>
+    <string name="nav_header_desc">Navigation header</string>
+    <string name="action_settings">Settings</string>
+
+    <string name="menu_home">Frigate</string>
+    <string name="menu_gallery">Gallery</string>
+    <string name="menu_slideshow">Slideshow</string>
+    <string name="menu_settings">Settings</string>
+    
+    <!-- Settings -->
+    <string name="internal_url_title">Internal URL</string>
+    <string name="internal_url_summary">The URL to use when connected to home network</string>
+    <string name="external_url_title">External URL</string>
+    <string name="external_url_summary">The URL to use when connected to external networks</string>
+    <string name="wifi_networks_title">Home WiFi Networks</string>
+    <string name="wifi_networks_summary">Comma-separated list of SSIDs for home networks</string>
+    <string name="network_settings">Network Settings</string>
+    <string name="web_view_settings">WebView Settings</string>
+    <string name="enable_javascript_title">Enable JavaScript</string>
+    <string name="enable_javascript_summary">Allow JavaScript execution in the WebView</string>
+    <string name="enable_dom_storage_title">Enable DOM Storage</string>
+    <string name="enable_dom_storage_summary">Enable DOM storage for the WebView</string>
+    <string name="refresh_on_network_change_title">Refresh on network change</string>
+    <string name="refresh_on_network_change_summary">Automatically refresh when the network changes</string>
+    
+    <!-- Arrays -->
+    <string-array name="empty_array">
+        <!-- Placeholder for dynamically filled arrays -->
+    </string-array>
+    
+    <!-- Connection mode arrays -->
+    <string-array name="connection_mode_entries">
+        <item>Auto (WiFi based)</item>
+        <item>Always use Internal URL</item>
+        <item>Always use External URL</item>
+    </string-array>
+    
+    <string-array name="connection_mode_values">
+        <item>auto</item>
+        <item>internal</item>
+        <item>external</item>
+    </string-array>
+</resources>

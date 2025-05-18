@@ -1,0 +1,85 @@
+// Special emergency fix for "Current WiFi" issue
+
+// Find this function in the SettingsFragment.kt class
+private fun updateWifiStatus() {
+    val wifiStatusPref = findPreference<Preference>("current_wifi_status")
+    if (wifiStatusPref == null) return
+    
+    // Get connection mode
+    val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+    val connectionMode = prefs.getString("connection_mode", "auto") ?: "auto"
+    
+    // If not in auto mode, show simple status
+    if (connectionMode != "auto") {
+        when (connectionMode) {
+            "internal" -> {
+                wifiStatusPref.summary = "Always using Internal URL\n(Connection mode: Forced Internal)"
+            }
+            "external" -> {
+                wifiStatusPref.summary = "Always using External URL\n(Connection mode: Forced External)"
+            }
+        }
+        return
+    }
+    
+    // In auto mode, check current WiFi status
+    try {
+        // First check if WiFi is enabled at all
+        val wifiManager = requireContext().applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+        
+        // Directly check if we're connected to a WiFi network
+        val cm = requireContext().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val activeNetwork = cm.activeNetwork
+        val capabilities = cm.getNetworkCapabilities(activeNetwork)
+        val isConnectedToWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+        
+        // Try to get current SSID 
+        var currentSsid = networkFixer.getSsidWithBestMethod()
+        
+        // EMERGENCY FIX: Never show "Current WiFi" as the network name
+        if (currentSsid == "Current WiFi" || currentSsid == "<unknown ssid>") {
+            
+            // Check if manual override is set
+            val manualOverride = prefs.getString("manual_home_network", "")
+            if (!manualOverride.isNullOrEmpty()) {
+                currentSsid = manualOverride
+            } else {
+                // Get the first home network if any
+                val homeNetworks = getHomeNetworks()
+                if (homeNetworks.isNotEmpty()) {
+                    currentSsid = homeNetworks.first()
+                }
+            }
+            
+            if (currentSsid == "Current WiFi" || currentSsid == "<unknown ssid>") {
+                // If still showing "Current WiFi", hide it completely
+                currentSsid = null
+            }
+        }
+        
+        // Show appropriate status
+        when {
+            !wifiManager.isWifiEnabled -> {
+                wifiStatusPref.summary = "WiFi is disabled\nUsing: External URL"
+            }
+            !isConnectedToWifi -> {
+                wifiStatusPref.summary = "WiFi is enabled but not connected\nUsing: External URL"
+            }
+            currentSsid != null -> {
+                val isHome = networkFixer.isHomeNetwork()
+                val status = if (isHome) "HOME" else "EXTERNAL"
+                val urlUsed = if (isHome) "Internal URL" else "External URL"
+                
+                // Show the network name
+                wifiStatusPref.summary = "Connected to: $currentSsid\nNetwork type: $status\nUsing: $urlUsed"
+            }
+            else -> {
+                // Must NEVER show "Current WiFi" here
+                wifiStatusPref.summary = "Connected to WiFi\nUsing: Internal URL (Default)\n\nTry setting Connection Mode to 'Internal' for best results"
+            }
+        }
+    } catch (e: Exception) {
+        wifiStatusPref.summary = "Error checking network status\nUsing: Internal URL\n\nTry setting Connection Mode to 'Internal'"
+        android.util.Log.e("SettingsFragment", "Error updating WiFi status: ${e.message}")
+    }
+}
