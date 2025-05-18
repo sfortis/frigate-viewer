@@ -42,15 +42,15 @@ class NetworkUtils(private val context: Context) {
     private val _isHomeNetwork = MutableLiveData<Boolean>()
     val isHomeNetwork: LiveData<Boolean> = _isHomeNetwork
     
-    private val _currentSsid = MutableLiveData<String>()
-    val currentSsid: LiveData<String> = _currentSsid
+    private val _currentSsid = MutableLiveData<String?>()
+    val currentSsid: LiveData<String?> = _currentSsid
     
     private val _isConnected = MutableLiveData<Boolean>()
     val isConnected: LiveData<Boolean> = _isConnected
     
     // URL LiveData to allow observing URL changes
-    private val _currentUrl = MutableLiveData<String>()
-    val currentUrl: LiveData<String> = _currentUrl
+    private val _currentUrl = MutableLiveData<String?>()
+    val currentUrl: LiveData<String?> = _currentUrl
     
     // Network callback for auto-refreshing on network changes
     private var networkCallback: ConnectivityManager.NetworkCallback? = null

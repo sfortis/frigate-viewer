@@ -368,7 +368,7 @@ class HomeFragment : Fragment() {
         // Make sure we load the initial URL
         homeViewModel.currentUrl.observe(viewLifecycleOwner) { url ->
             // This is just for initial loading - network changes are handled above
-            if (currentLoadedUrl.isEmpty() && url.isNotEmpty()) {
+            if (currentLoadedUrl.isEmpty() && !url.isNullOrEmpty()) {
                 Log.d("HomeFragment", "Initial URL load: $url")
                 binding.webView.loadUrl(url)
                 currentLoadedUrl = url
@@ -394,10 +394,10 @@ class HomeFragment : Fragment() {
         homeViewModel.currentNetwork.observe(viewLifecycleOwner) { network ->
             // Extract the actual SSID from the network string
             val ssid = when {
-                network.startsWith("Home: ") -> network.removePrefix("Home: ")
-                network.startsWith("External: ") -> network.removePrefix("External: ")
+                network?.startsWith("Home: ") == true -> network.removePrefix("Home: ")
+                network?.startsWith("External: ") == true -> network.removePrefix("External: ")
                 network == "Not Connected" -> ""
-                else -> network
+                else -> network ?: ""
             }
             
             Log.d("HomeFragment", "Network changed from '$previousNetworkSsid' to '$ssid'")
@@ -468,7 +468,7 @@ class HomeFragment : Fragment() {
             Log.d("HomeFragment", "Current network changed: '$ssid'")
             
             // Use NetworkUtils to get the most reliable display SSID
-            val displaySsid = if (ssid == "Current WiFi" || ssid == "<unknown ssid>" || ssid.isEmpty()) {
+            val displaySsid = if (ssid == null || ssid == "Current WiFi" || ssid == "<unknown ssid>" || ssid.isEmpty()) {
                 // Try to get SSID directly using NetworkUtils' reliable detection
                 val detectedSsid = networkUtils.getSsidWithBestMethod()
                 
@@ -496,7 +496,7 @@ class HomeFragment : Fragment() {
                     }
                 }
             } else {
-                ssid
+                ssid ?: ""
             }
             
             // Use the cleaned-up display SSID but only log it, don't show notification
@@ -513,7 +513,7 @@ class HomeFragment : Fragment() {
             // 3. Manual override is NOT set
             if (!hasShownDetectionFailureNotice && 
                 manualOverride.isEmpty() && 
-                (ssid == "Current WiFi" || ssid.contains("Failed") || ssid == "WiFi (Permission Issue)")
+                (ssid == "Current WiFi" || ssid?.contains("Failed") == true || ssid == "WiFi (Permission Issue)")
             ) {
                 // Show a single Snackbar instead of both Toast and Snackbar
                 Snackbar.make(

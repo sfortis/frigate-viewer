@@ -31,8 +31,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val isHomeNetwork: LiveData<Boolean> = networkUtils.isHomeNetwork
     
     // MediatorLiveData to combine SSID sources for better detection
-    private val _currentNetwork = MediatorLiveData<String>()
-    val currentNetwork: LiveData<String> = _currentNetwork
+    private val _currentNetwork = MediatorLiveData<String?>()
+    val currentNetwork: LiveData<String?> = _currentNetwork
     
     // Network callback to only respond to actual network changes
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -40,8 +40,8 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val isConnected: LiveData<Boolean> = networkUtils.isConnected
     
     // URL MediatorLiveData observes NetworkUtils URL changes
-    private val _currentUrl = MediatorLiveData<String>()
-    val currentUrl: LiveData<String> = _currentUrl
+    private val _currentUrl = MediatorLiveData<String?>()
+    val currentUrl: LiveData<String?> = _currentUrl
     
     private fun updateCurrentUrl(isHome: Boolean) {
         val prefs = PreferenceManager.getDefaultSharedPreferences(getApplication())
@@ -73,7 +73,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         // From NetworkUtils
         _currentNetwork.addSource(networkUtils.currentSsid) { ssid ->
             Log.d("HomeViewModel", "SSID from NetworkUtils: $ssid")
-            if (ssid.isNotEmpty()) {
+            if (!ssid.isNullOrEmpty()) {
                 _currentNetwork.postValue(ssid)
             }
         }
@@ -81,7 +81,7 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         // From WifiNetworkManager (primary source using coroutines)
         _currentNetwork.addSource(wifiNetworkManager.ssidData) { ssid ->
             Log.d("HomeViewModel", "SSID from WifiNetworkManager: $ssid")
-            if (ssid.isNotEmpty()) {
+            if (!ssid.isNullOrEmpty()) {
                 _currentNetwork.postValue(ssid)
                 
                 // When SSID changes, we should check if it's a home network

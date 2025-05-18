@@ -52,8 +52,8 @@ class WifiNetworkManager(private val context: Context) {
     private val CACHE_DURATION = 3000L // 3 seconds
     
     // LiveData for observers
-    private val _ssidData = MutableLiveData<String>()
-    val ssidData: LiveData<String> = _ssidData
+    private val _ssidData = MutableLiveData<String?>()
+    val ssidData: LiveData<String?> = _ssidData
     
     // Network callback for active monitoring
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
