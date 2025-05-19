@@ -31,6 +31,8 @@ import androidx.preference.MultiSelectListPreference
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
 import androidx.preference.PreferenceManager
+import androidx.preference.SwitchPreferenceCompat
+import androidx.lifecycle.LifecycleOwner
 import com.asksakis.freegate.R
 import com.asksakis.freegate.utils.NetworkUtils
 import com.asksakis.freegate.utils.WifiNetworkManager
@@ -47,7 +49,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         
         // Initialize network managers
         wifiNetworkManager = WifiNetworkManager(requireContext())
-        networkUtils = NetworkUtils(requireContext())
+        networkUtils = NetworkUtils.getInstance(requireContext())
         
         // Setup connection mode preference
         setupConnectionModePreference()
@@ -63,6 +65,12 @@ class SettingsFragment : PreferenceFragmentCompat() {
         
         // Update WiFi status
         updateWifiStatus()
+        
+        // Observe network changes to update status automatically
+        setupNetworkObservers()
+        
+        // Setup advanced preferences
+        setupAdvancedPreferences()
     }
     
     /**
@@ -167,8 +175,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
         
         // Method 3: Try via network utils
         if (suggestedSsid == null || suggestedSsid == "<unknown ssid>") {
-            val utils = NetworkUtils(requireContext())
-            suggestedSsid = utils.forceWifiConnection()
+            val utils = NetworkUtils.getInstance(requireContext())
+            suggestedSsid = utils.getSsid()
             android.util.Log.d("SettingsFragment", "SSID from NetworkUtils: $suggestedSsid")
         }
         
@@ -322,7 +330,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
     private fun getActiveWifiSsid(): String? {
         try {
             // Use networkUtils' simplified detection for best results
-            val ssid = networkUtils.getSsidWithBestMethod()
+            val ssid = networkUtils.getSsid()
             android.util.Log.d("SettingsFragment", "NetworkUtils SSID: $ssid")
             
             if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
@@ -799,12 +807,28 @@ class SettingsFragment : PreferenceFragmentCompat() {
             val manualHomeNetwork = findPreference<EditTextPreference>("manual_home_network")
             
             // Set dialog EditText creation listener for each preference
-            val editTextPrefs = listOfNotNull(internalUrl, externalUrl, manualHomeNetwork)
+            val urlPrefs = listOfNotNull(internalUrl, externalUrl)
+            val networkPrefs = listOfNotNull(manualHomeNetwork)
             
-            for (pref in editTextPrefs) {
+            // Configure URL preferences
+            for (pref in urlPrefs) {
                 pref.setOnBindEditTextListener { editText ->
-                    // Disable autocorrect and suggestions
-                    editText.inputType = editText.inputType or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    // Set proper input type for URLs with no suggestions
+                    editText.inputType = InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                    editText.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
+                    
+                    // Disable autofill
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        editText.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+                    }
+                }
+            }
+            
+            // Configure network name preferences
+            for (pref in networkPrefs) {
+                pref.setOnBindEditTextListener { editText ->
+                    // Disable autocorrect and suggestions for network names
+                    editText.inputType = InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     editText.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
                     
                     // Disable autofill
@@ -815,6 +839,63 @@ class SettingsFragment : PreferenceFragmentCompat() {
             }
         } catch (e: Exception) {
             Log.e("SettingsFragment", "Error disabling autocorrect: ${e.message}")
+        }
+    }
+    
+    /**
+     * Set up observers for network state changes to update status automatically
+     */
+    private fun setupNetworkObservers() {
+        // Observe SSID changes
+        networkUtils.currentSsid.observe(this as LifecycleOwner) { ssid ->
+            updateWifiStatus()
+        }
+        
+        // Observe connection state changes
+        networkUtils.isConnected.observe(this as LifecycleOwner) { isConnected ->
+            updateWifiStatus()
+        }
+        
+        // Observe home network state changes
+        networkUtils.isHomeNetwork.observe(this as LifecycleOwner) { isHome ->
+            updateWifiStatus()
+        }
+        
+        // Observe URL changes (as a result of network changes)
+        networkUtils.currentUrl.observe(this as LifecycleOwner) { url ->
+            updateWifiStatus()
+        }
+    }
+    
+    /**
+     * Setup advanced preferences like custom user agent
+     */
+    private fun setupAdvancedPreferences() {
+        val customUserAgentPref = findPreference<EditTextPreference>("custom_user_agent")
+        customUserAgentPref?.summaryProvider = EditTextPreference.SimpleSummaryProvider.getInstance()
+        
+        // Update the summary to show the current user agent
+        val useCustomUserAgent = findPreference<SwitchPreferenceCompat>("use_custom_user_agent")
+        useCustomUserAgent?.setOnPreferenceChangeListener { preference, newValue ->
+            val enabled = newValue as Boolean
+            if (enabled) {
+                Toast.makeText(requireContext(), 
+                    "Custom User Agent enabled. The page will reload with new settings.", 
+                    Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(requireContext(), 
+                    "Using default User Agent", 
+                    Toast.LENGTH_SHORT).show()
+            }
+            true
+        }
+        
+        // Update custom user agent edit text hint
+        customUserAgentPref?.setOnPreferenceChangeListener { preference, newValue ->
+            Toast.makeText(requireContext(), 
+                "User Agent updated. The page will reload with new settings.", 
+                Toast.LENGTH_SHORT).show()
+            true
         }
     }
     

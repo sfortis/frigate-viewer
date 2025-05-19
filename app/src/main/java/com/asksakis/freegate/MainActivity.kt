@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
     ) { isGranted ->
         if (isGranted) {
             // Permission granted, refresh network status
-            networkUtils.checkNetworkStatus()
+            networkUtils.checkStatus()
             
             // Refresh the current fragment if it's the home fragment
             if (::navController.isInitialized && 
@@ -85,8 +85,8 @@ class MainActivity : AppCompatActivity() {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
         
-        // Initialize network utilities
-        networkUtils = NetworkUtils(this)
+        // Initialize network utilities (singleton)
+        networkUtils = NetworkUtils.getInstance(this)
         
         // Find network indicator
         networkIndicator = findViewById(R.id.network_indicator)
@@ -403,7 +403,7 @@ class MainActivity : AppCompatActivity() {
             val connectionMode = prefs.getString("connection_mode", "auto") ?: "auto"
             
             // Check if we're on a home network
-            val isHomeNetwork = networkUtils.isHomeNetwork()
+            val isHomeNetwork = networkUtils.isHome()
             
             // In manual mode, use the fixed setting; in auto mode, use actual connection
             val isInternal = when (connectionMode) {
@@ -438,37 +438,11 @@ class MainActivity : AppCompatActivity() {
     
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        Log.d("MainActivity", "onBackPressed called - drawer open: ${binding.drawerLayout.isDrawerOpen(GravityCompat.START)}")
+        
         if (binding.drawerLayout.isDrawerOpen(GravityCompat.START)) {
             binding.drawerLayout.closeDrawer(GravityCompat.START)
-        } else if (::navController.isInitialized) {
-            when (navController.currentDestination?.id) {
-                R.id.nav_home -> {
-                    // Let the HomeFragment handle the back press for WebView navigation
-                    val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main)
-                    val currentFragment = navHostFragment?.childFragmentManager?.fragments?.getOrNull(0)
-                    if (currentFragment is com.asksakis.freegate.ui.home.HomeFragment) {
-                        if (currentFragment.handleBackPress()) {
-                            // Back press was handled by the fragment
-                            return
-                        }
-                    }
-                    // If WebView couldn't go back, exit the app
-                    @Suppress("DEPRECATION")
-                    super.onBackPressed()
-                }
-                R.id.nav_settings -> {
-                    // From settings, always navigate back to home
-                    android.util.Log.d("MainActivity", "Back pressed from settings, navigating to home")
-                    navController.navigate(R.id.nav_home)
-                }
-                else -> {
-                    // For any other fragments, go back to home
-                    android.util.Log.d("MainActivity", "Back pressed from other fragment, navigating to home")
-                    navController.navigate(R.id.nav_home)
-                }
-            }
         } else {
-            // NavController not yet initialized, just use default behavior
             @Suppress("DEPRECATION")
             super.onBackPressed()
         }

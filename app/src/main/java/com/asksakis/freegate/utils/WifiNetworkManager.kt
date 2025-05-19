@@ -59,8 +59,8 @@ class WifiNetworkManager(private val context: Context) {
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     
     init {
-        // Start monitoring in the init block
-        startNetworkMonitoring()
+        // Network monitoring disabled - now handled by NetworkUtils to avoid duplication
+        // startNetworkMonitoring()
     }
     
     /**
@@ -155,7 +155,9 @@ class WifiNetworkManager(private val context: Context) {
     
     /**
      * Start monitoring network changes to proactively update SSID information
+     * @deprecated Network monitoring is now handled by NetworkUtils to avoid duplication
      */
+    @Deprecated("Network monitoring now handled by NetworkUtils", ReplaceWith("NetworkUtils"))
     private fun startNetworkMonitoring() {
         if (networkCallback != null) return
         
@@ -185,7 +187,9 @@ class WifiNetworkManager(private val context: Context) {
     
     /**
      * Stop monitoring when no longer needed
+     * @deprecated Network monitoring is now handled by NetworkUtils to avoid duplication
      */
+    @Deprecated("Network monitoring now handled by NetworkUtils", ReplaceWith("NetworkUtils"))
     fun stopNetworkMonitoring() {
         try {
             networkCallback?.let {

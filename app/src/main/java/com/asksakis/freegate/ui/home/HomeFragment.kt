@@ -1,13 +1,15 @@
 package com.asksakis.freegate.ui.home
 
-import android.annotation.SuppressLint
-import android.content.BroadcastReceiver
+import android.Manifest
 import android.content.Context
 import android.content.Intent
-import android.content.IntentFilter
-import android.graphics.Color
+import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
-import android.net.wifi.WifiManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -15,23 +17,25 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
-import androidx.navigation.findNavController
 import androidx.preference.PreferenceManager
 import com.asksakis.freegate.R
 import com.asksakis.freegate.databinding.FragmentHomeBinding
 import com.asksakis.freegate.utils.NetworkUtils
-import com.google.android.material.snackbar.Snackbar
+import com.asksakis.freegate.utils.TopSwipeRefreshLayout
+import kotlin.system.exitProcess
 
 class HomeFragment : Fragment() {
 
@@ -40,211 +44,384 @@ class HomeFragment : Fragment() {
     
     private lateinit var homeViewModel: HomeViewModel
     private lateinit var networkUtils: NetworkUtils
-    // Track the current loaded URL to prevent redundant loads
-    private var currentLoadedUrl = ""
-    // WebView state bundle for restoration
-    private var webViewState: Bundle? = null
-    // Modern implementation doesn't use BroadcastReceiver, network status is checked proactively
+    private lateinit var fileChooserLauncher: ActivityResultLauncher<Intent>
+    // Permission launcher removed - app doesn't use notifications
+    
+    private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
+    private var previousNetworkSsid: String = ""
+    private var currentLoadedUrl: String? = null
+    private var networkTransitionInProgress = false
+    private var lastUrlChangeTime: Long = 0
+    private val URL_CHANGE_DEBOUNCE_MS = 3000L
+    private var pendingUrl: String? = null
+    private val NETWORK_CHECK_TIMEOUT_MS = 5000L
+    
+    companion object {
+        private const val TAG = "HomeFragment"
+    }
 
-    @SuppressLint("SetJavaScriptEnabled")
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
         homeViewModel = ViewModelProvider(this)[HomeViewModel::class.java]
-        networkUtils = NetworkUtils(requireContext())
-
+        networkUtils = NetworkUtils.getInstance(requireContext())
+        
         _binding = FragmentHomeBinding.inflate(inflater, container, false)
         val root: View = binding.root
         
-        // Restore saved state if available
-        savedInstanceState?.let { bundle ->
-            webViewState = bundle.getBundle("webViewState")
-            currentLoadedUrl = bundle.getString("currentLoadedUrl", "")
-        }
+        setupNetworkObservers()
+        setupWebView()
+        setupFileChooserLauncher()
+        // Permission launcher setup removed - app doesn't use notifications
+        setupBackPressedCallback()
         
-
-        // Setup WebChromeClient to suppress logs and handle advanced features
-        binding.webView.webChromeClient = object : WebChromeClient() {
-            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-                // Suppress all console messages to reduce logcat spam
-                return true
-            }
+        return root
+    }
+    
+    private fun setupNetworkObservers() {
+        homeViewModel.currentUrl.observe(viewLifecycleOwner) { url ->
+            Log.d(TAG, "URL LiveData updated: $url")
             
-            override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                super.onProgressChanged(view, newProgress)
-                // Update progress silently without logging
-                if (newProgress < 100) {
+            if (url != null) {
+                val currentTime = System.currentTimeMillis()
+                val timeSinceLastChange = currentTime - lastUrlChangeTime
+                
+                if (currentLoadedUrl == null) {
+                    // Initial load
+                    Log.d(TAG, "Initial URL load: $url")
                     binding.loadingProgress.visibility = View.VISIBLE
-                } else {
-                    binding.loadingProgress.visibility = View.GONE
+                    
+                    // Check network connectivity before loading
+                    checkNetworkConnectivity { isConnected ->
+                        if (isConnected) {
+                            binding.webView.loadUrl(url)
+                            currentLoadedUrl = url
+                            lastUrlChangeTime = currentTime
+                        } else {
+                            Log.d(TAG, "No connectivity for initial load - will retry when network available")
+                        }
+                    }
+                } else if (url != currentLoadedUrl && !networkTransitionInProgress 
+                    && timeSinceLastChange > URL_CHANGE_DEBOUNCE_MS) {
+                    // URL changed and not during transition, and enough time has passed
+                    Log.d(TAG, "URL changed from $currentLoadedUrl to $url (time since last: ${timeSinceLastChange}ms)")
+                    binding.loadingProgress.visibility = View.VISIBLE
+                    
+                    // Check network connectivity before loading new URL
+                    checkNetworkConnectivity { isConnected ->
+                        if (isConnected) {
+                            binding.webView.loadUrl(url)
+                            currentLoadedUrl = url
+                            lastUrlChangeTime = currentTime
+                        } else {
+                            Log.d(TAG, "No connectivity for URL change - will retry when network available")
+                            // Set a flag to retry this URL when network becomes available
+                            pendingUrl = url
+                        }
+                    }
+                } else if (url != currentLoadedUrl) {
+                    Log.d(TAG, "URL change ignored - too soon or in transition (time since last: ${timeSinceLastChange}ms)")
                 }
             }
         }
+    }
+    
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
         
-        // Setup WebView with enhanced error handling
+        // Initial URL load is now handled in setupNetworkObservers
+        // Removed duplicate URL observer
+        
+        homeViewModel.currentNetwork.observe(viewLifecycleOwner) { networkInfo ->
+            Log.d(TAG, "Network changed: $networkInfo")
+            
+            val ssid = networkInfo?.substringAfter(": ")?.trim() ?: ""
+            
+            if (previousNetworkSsid != ssid && ssid.isNotEmpty()) {
+                Log.d(TAG, "Network state changed from '$previousNetworkSsid' to '$ssid'")
+                
+                // Set transition flag immediately to prevent multiple reloads
+                networkTransitionInProgress = true
+                
+                // Use a delayed handler to refresh status after network stabilizes
+                binding.webView.postDelayed({
+                    homeViewModel.refreshStatus()
+                    // Reset transition flag after another delay
+                    binding.webView.postDelayed({
+                        networkTransitionInProgress = false
+                    }, URL_CHANGE_DEBOUNCE_MS)
+                }, 1000) // Wait 1 second for network to stabilize
+            }
+            
+            previousNetworkSsid = ssid
+        }
+    }
+    
+    private fun setupFileChooserLauncher() {
+        fileChooserLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            if (fileUploadCallback == null) {
+                return@registerForActivityResult
+            }
+            
+            val data = result.data
+            var results: Array<Uri>? = null
+            
+            if (result.resultCode == android.app.Activity.RESULT_OK) {
+                if (data?.dataString != null) {
+                    results = arrayOf(Uri.parse(data.dataString))
+                } else if (data?.clipData != null) {
+                    val count = data.clipData!!.itemCount
+                    results = Array(count) { i ->
+                        data.clipData!!.getItemAt(i).uri
+                    }
+                }
+            }
+            
+            fileUploadCallback?.onReceiveValue(results)
+            fileUploadCallback = null
+        }
+    }
+    
+    // Permission launcher setup removed - app doesn't use notifications
+    
+    private fun setupWebView() {
+        // Combine all WebViewClient functionality into one object
         binding.webView.webViewClient = object : WebViewClient() {
-            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                super.onPageStarted(view, url, favicon)
-                Log.d("HomeFragment", "Starting to load URL: $url")
-                binding.loadingProgress.visibility = View.VISIBLE
+            override fun onReceivedSslError(
+                view: WebView?,
+                handler: android.webkit.SslErrorHandler?,
+                error: android.net.http.SslError?
+            ) {
+                // Accept all SSL certificates including self-signed
+                // WARNING: This bypasses SSL security - only use for trusted internal networks
+                val primaryError = when (error?.primaryError) {
+                    android.net.http.SslError.SSL_NOTYETVALID -> "Certificate not yet valid"
+                    android.net.http.SslError.SSL_EXPIRED -> "Certificate expired"
+                    android.net.http.SslError.SSL_IDMISMATCH -> "Certificate ID mismatch"
+                    android.net.http.SslError.SSL_UNTRUSTED -> "Certificate not trusted"
+                    android.net.http.SslError.SSL_DATE_INVALID -> "Certificate date invalid"
+                    android.net.http.SslError.SSL_INVALID -> "Certificate invalid"
+                    else -> "Unknown SSL error"
+                }
+                Log.w(TAG, "SSL error occurred: $primaryError for URL: ${error?.url} - proceeding anyway")
+                handler?.proceed()
+            }
+            
+            @Deprecated("Deprecated in Java")
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                Log.d(TAG, "shouldOverrideUrlLoading: $url")
+                
+                // Handle intent:// URLs
+                if (url?.startsWith("intent://") == true) {
+                    try {
+                        val intent = Intent.parseUri(url, Intent.URI_INTENT_SCHEME)
+                        if (intent != null) {
+                            val packageManager = view?.context?.packageManager
+                            val info = packageManager?.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                            if (info != null) {
+                                view.context?.startActivity(intent)
+                            } else {
+                                val fallbackUrl = intent.getStringExtra("browser_fallback_url")
+                                if (fallbackUrl != null) {
+                                    view?.loadUrl(fallbackUrl)
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                    return true
+                }
+                
+                // Handle regular URLs
+                return if (url?.startsWith("http://") == true || url?.startsWith("https://") == true) {
+                    view?.loadUrl(url)
+                    true
+                } else {
+                    try {
+                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+                        startActivity(intent)
+                        true
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error launching intent for URL: $url", e)
+                        false
+                    }
+                }
             }
             
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
-                Log.d("HomeFragment", "Finished loading URL: $url")
+                val safeBinding = _binding ?: return
+                safeBinding.loadingProgress.visibility = View.GONE
+                currentLoadedUrl = url
+                Log.d(TAG, "Page finished loading: $url")
                 
-                // Hide loading indicator for all pages (including blank pages)
-                binding.loadingProgress.visibility = View.GONE
+                // Reset network transition flag when page finishes loading
+                networkTransitionInProgress = false
                 
-                // Update current URL if it's not a blank page
-                if (url != "about:blank") {
-                    currentLoadedUrl = url ?: ""
-                }
-                
-                // Show network info again when page is loaded
-                displayNetworkInfo()
+                safeBinding.swipeRefresh.isRefreshing = false
             }
             
             override fun onReceivedError(
-                view: WebView?,
-                request: WebResourceRequest?,
-                error: WebResourceError?
+                view: WebView,
+                request: android.webkit.WebResourceRequest,
+                error: android.webkit.WebResourceError
             ) {
                 super.onReceivedError(view, request, error)
-                binding.loadingProgress.visibility = View.GONE
+                val safeBinding = _binding ?: return
                 
-                // Only show errors for main frame requests, not for resources
-                if (request?.isForMainFrame != true) {
-                    return
-                }
-                
-                val errorUrl = request.url.toString()
-                val errorCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    error?.errorCode
-                } else {
-                    -1
-                }
-                val errorDescription = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    error?.description
-                } else {
-                    "Unknown error"
-                }
-                
-                Log.e("HomeFragment", "Error loading URL: $errorUrl, code: $errorCode, description: $errorDescription")
-                
-                // Attempt to check if this is a network related error
-                val isNetworkError = when (errorCode) {
-                    WebViewClient.ERROR_HOST_LOOKUP,
-                    WebViewClient.ERROR_CONNECT,
-                    WebViewClient.ERROR_TIMEOUT,
-                    WebViewClient.ERROR_UNKNOWN,
-                    WebViewClient.ERROR_FAILED_SSL_HANDSHAKE,
-                    WebViewClient.ERROR_PROXY_AUTHENTICATION,
-                    WebViewClient.ERROR_IO -> true
-                    -6 -> true // ERROR_CONNECTION_ABORTED (not in constants)
-                    else -> false
-                }
-                
-                // Check if this is a connection abort due to URL switching
-                if (errorCode == -6 && errorDescription?.contains("ERR_CONNECTION_ABORTED") == true) {
-                    // This is expected when switching URLs, don't show error
-                    Log.d("HomeFragment", "Connection aborted during URL switch - this is expected")
-                    return
-                }
-                
-                val message = when {
-                    errorCode == WebViewClient.ERROR_HOST_LOOKUP -> {
-                        // DNS/Host resolution error - the URL might be wrong
-                        val urlType = if (homeViewModel.isHomeNetwork.value == true) "Internal" else "External"
-                        "Cannot find server for $urlType URL.\nCheck the URL in Settings is correct."
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Log.e(TAG, "WebView error: ${error.errorCode} - ${error.description} at ${request.url}")
+                    safeBinding.loadingProgress.visibility = View.GONE
+                    
+                    // Check if it's a connection error (like ERR_CONNECTION_RESET or ERR_INTERNET_DISCONNECTED)
+                    if (error.errorCode == android.webkit.WebViewClient.ERROR_CONNECT ||
+                        error.errorCode == android.webkit.WebViewClient.ERROR_HOST_LOOKUP ||
+                        error.errorCode == android.webkit.WebViewClient.ERROR_TIMEOUT ||
+                        error.errorCode == android.webkit.WebViewClient.ERROR_FAILED_SSL_HANDSHAKE) {
+                        
+                        Log.d(TAG, "Network-related error detected, will retry when network is available")
+                        
+                        // Check if the error is for the main page or a resource
+                        val isMainFrameError = request.isForMainFrame || 
+                            (currentLoadedUrl != null && request.url.toString().startsWith(currentLoadedUrl!!))
+                        
+                        // Only handle main frame errors, ignore resource errors like analytics
+                        if (isMainFrameError) {
+                            // Get the current URL or the pending one
+                            val mainUrl = if (request.isForMainFrame) request.url.toString() else currentLoadedUrl
+                            
+                            // If this is a Cloudflare analytics error, we can safely ignore it
+                            if (request.url.toString().contains("cloudflareinsights") || 
+                                request.url.toString().contains("analytics")) {
+                                Log.d(TAG, "Ignoring analytics error - not critical for page loading")
+                                return
+                            }
+                            
+                            Log.d(TAG, "Critical page-loading error, will retry when DNS is available")
+                            pendingUrl = mainUrl
+                            
+                            // Set up a periodic network check with DNS resolution to retry
+                            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+                            val retryRunnable = object : Runnable {
+                                var retryCount = 0
+                                
+                                override fun run() {
+                                    retryCount++
+                                    
+                                    if (retryCount > 10) {
+                                        Log.d(TAG, "Giving up after 10 retry attempts")
+                                        return
+                                    }
+                                    
+                                    checkNetworkConnectivity { isConnected ->
+                                        if (isConnected && pendingUrl != null) {
+                                            Log.d(TAG, "Network with DNS is now available, retrying URL: $pendingUrl")
+                                            pendingUrl?.let { url ->
+                                                view.loadUrl(url)
+                                                pendingUrl = null
+                                            }
+                                        } else if (!isConnected) {
+                                            // Schedule another check in 3 seconds
+                                            handler.postDelayed(this, 3000)
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // Start checking for network connectivity
+                            handler.postDelayed(retryRunnable, 3000)
+                        } else {
+                            // For resource errors (especially cloudflareinsights), log but don't retry
+                            Log.d(TAG, "Resource error for ${request.url} - ignoring as it's not critical")
+                        }
                     }
-                    errorCode == WebViewClient.ERROR_CONNECT -> {
-                        // Connection refused or timeout
-                        val urlType = if (homeViewModel.isHomeNetwork.value == true) "Internal" else "External"
-                        "Cannot connect to $urlType URL.\nThe server might be down or unreachable."
-                    }
-                    errorCode == WebViewClient.ERROR_TIMEOUT -> {
-                        "Connection timed out.\nThe server is taking too long to respond."
-                    }
-                    isNetworkError -> {
-                        // Generic network error
-                        val isCurrentlyUsingInternal = homeViewModel.isHomeNetwork.value == true
-                        val alternateType = if (isCurrentlyUsingInternal) "External" else "Internal"
-                        "Network error accessing the ${if (isCurrentlyUsingInternal) "Internal" else "External"} URL.\n" +
-                        "Try switching to the $alternateType URL in Settings."
-                    }
-                    else -> {
-                        // Non-network error
-                        "Error loading page: $errorDescription"
-                    }
                 }
-                
-                Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG)
-                    .setAction("Settings") {
-                        // Navigate to settings
-                        requireActivity().findNavController(R.id.nav_host_fragment_content_main)
-                            .navigate(R.id.nav_settings)
-                    }.show()
-                
-                // Toggle refresh icon to indicate a refresh is possible
-                binding.swipeRefresh.isRefreshing = false
             }
             
-            override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
-                // Handle renderer crash
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val didCrash = detail?.didCrash() == true
-                    
-                    Log.e("HomeFragment", "WebView renderer gone - crashed: $didCrash")
-                    
-                    // Show loading progress immediately
-                    binding.loadingProgress.visibility = View.VISIBLE
-                    
-                    // Clear the WebView's state
-                    view?.apply {
-                        stopLoading()
-                        clearCache(true)
-                        clearHistory()
-                        clearFormData()
-                    }
-                    
-                    // Show appropriate message
-                    if (didCrash) {
-                        Snackbar.make(binding.root, "Page crashed. Reloading...", Snackbar.LENGTH_LONG).show()
-                    }
-                    
-                    // Reload the current URL with a delay
-                    view?.postDelayed({
-                        val currentUrl = homeViewModel.currentUrl.value
-                        if (!currentUrl.isNullOrEmpty()) {
-                            Log.d("HomeFragment", "Reloading after renderer crash: $currentUrl")
-                            binding.webView.loadUrl(currentUrl)
-                            currentLoadedUrl = currentUrl
-                        } else {
-                            // No URL to load, hide progress
-                            binding.loadingProgress.visibility = View.GONE
-                        }
-                    }, 1000)
-                    
-                    return true // Prevent app crash
-                }
+            override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                super.doUpdateVisitedHistory(view, url, isReload)
+                val safeBinding = _binding ?: return
                 
-                // For older Android versions, show progress and reload
-                Log.e("HomeFragment", "WebView renderer process gone (pre-O)")
-                binding.loadingProgress.visibility = View.VISIBLE
-                view?.reload()
-                return true
+                if (!isReload) {
+                    safeBinding.loadingProgress.visibility = View.VISIBLE
+                    view?.reload()
+                }
             }
         }
         
-        // Configure WebView settings
-        val webSettings = binding.webView.settings
-        val settings = homeViewModel.getWebViewSettings()
         
-        webSettings.javaScriptEnabled = settings["javascript"] ?: true
-        webSettings.domStorageEnabled = settings["dom_storage"] ?: true
+        // Setup WebChromeClient
+        binding.webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                Log.d(TAG, "Console: ${consoleMessage?.message()} -- From line " +
+                        "${consoleMessage?.lineNumber()} of ${consoleMessage?.sourceId()}")
+                return true
+            }
+            
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                val safeBinding = _binding ?: return false
+                
+                fileUploadCallback?.onReceiveValue(null)
+                fileUploadCallback = filePathCallback
+                
+                val intent = fileChooserParams?.createIntent()
+                try {
+                    fileChooserLauncher.launch(intent)
+                } catch (e: Exception) {
+                    fileUploadCallback = null
+                    // Toast removed - unnecessary notification
+                    return false
+                }
+                return true
+            }
+            
+            override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                val safeBinding = _binding ?: return
+                
+                if (newProgress < 100) {
+                    safeBinding.loadingProgress.visibility = View.VISIBLE
+                    safeBinding.loadingProgress.progress = newProgress
+                } else {
+                    safeBinding.loadingProgress.visibility = View.GONE
+                }
+            }
+            
+            override fun onPermissionRequest(request: android.webkit.PermissionRequest?) {
+                val safeBinding = _binding ?: return
+                
+                request?.resources?.let { resources ->
+                    if (resources.contains(android.webkit.PermissionRequest.RESOURCE_VIDEO_CAPTURE) ||
+                        resources.contains(android.webkit.PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
+                        
+                        if (ContextCompat.checkSelfPermission(safeBinding.root.context, 
+                                Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED ||
+                            ContextCompat.checkSelfPermission(safeBinding.root.context, 
+                                Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+                            request.grant(resources)
+                        } else {
+                            request.deny()
+                        }
+                    } else {
+                        request.grant(resources)
+                    }
+                } ?: request?.deny()
+            }
+        }
+        
+        val webSettings = binding.webView.settings
+        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        
+        webSettings.javaScriptEnabled = prefs.getBoolean("enable_javascript", true)
+        webSettings.domStorageEnabled = prefs.getBoolean("enable_dom_storage", true)
         webSettings.setSupportZoom(true)
         webSettings.builtInZoomControls = true
         webSettings.displayZoomControls = false
@@ -252,394 +429,410 @@ class HomeFragment : Fragment() {
         webSettings.useWideViewPort = true
         webSettings.cacheMode = WebSettings.LOAD_DEFAULT
         
-        // Apply "Keep screen on" setting
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-        val keepScreenOn = prefs.getBoolean("keep_screen_on", false)
-        binding.webView.keepScreenOn = keepScreenOn
+        webSettings.javaScriptCanOpenWindowsAutomatically = true
         
-        // Configure viewport for proper zoom behavior
-        webSettings.allowFileAccess = true
-        webSettings.allowContentAccess = true
-        webSettings.setSupportMultipleWindows(false)
-        webSettings.javaScriptCanOpenWindowsAutomatically = false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            webSettings.safeBrowsingEnabled = true
+        }
         
-        // Additional settings for better compatibility with web apps
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            // Allow mixed content (HTTP content in HTTPS pages) for compatibility
             webSettings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
-            webSettings.mediaPlaybackRequiresUserGesture = false
-        }
         
-        // Make sure the WebView can load content from any source including cleartext HTTP
-        webSettings.blockNetworkLoads = false
+        webSettings.mediaPlaybackRequiresUserGesture = false
         
-        // Set user agent to a desktop-like string to get desktop version where possible
-        webSettings.userAgentString = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Safari/537.36"
+        webSettings.allowFileAccess = true
+        webSettings.allowContentAccess = true
         
-        // Configure for stability
+        // Removed deprecated file access settings - targeting Android 13+
+        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
-            // Enable web contents debugging for better error tracking in debug builds
             WebView.setWebContentsDebuggingEnabled(true)
         }
         
-        // Set up memory management for better stability
+        val prefs2 = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        val useCustomUserAgent = prefs2.getBoolean("use_custom_user_agent", false)
+        
+        webSettings.userAgentString = if (useCustomUserAgent) {
+            prefs2.getString("custom_user_agent", 
+                "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}; ${Build.MODEL}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36"
+            ) ?: "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}; ${Build.MODEL}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36"
+        } else {
+            "Mozilla/5.0 (Linux; Android ${Build.VERSION.RELEASE}; ${Build.MODEL}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36"
+        }
+        
+        webSettings.javaScriptCanOpenWindowsAutomatically = true
+        
         @Suppress("DEPRECATION")
         webSettings.databaseEnabled = true
         
-        // Setup SwipeRefreshLayout
         binding.swipeRefresh.setOnRefreshListener {
-            homeViewModel.checkNetworkStatus()
+            networkUtils.checkStatus()
             binding.webView.reload()
             binding.swipeRefresh.isRefreshing = false
         }
         
-        // Monitor WebView scroll position to enable/disable swipe refresh
-        binding.webView.viewTreeObserver.addOnScrollChangedListener {
-            // Check if binding is still valid before accessing it
-            _binding?.let { safeBinding ->
-                // Enable swipe refresh only when WebView is at the top
-                safeBinding.swipeRefresh.isEnabled = safeBinding.webView.scrollY == 0
+        if (context != null) {
+            val connectivityManager = requireContext().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val activeNetwork = connectivityManager.activeNetwork
+            val networkCapabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+            val isConnected = networkCapabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+            
+            if (!isConnected) {
+                // Error message removed from layout
+                // Toast removed - unnecessary notification
             }
         }
-        
-        // Restore WebView state if available
-        webViewState?.let { state ->
-            Log.d("HomeFragment", "Restoring WebView state")
-            binding.webView.restoreState(state)
-            // Hide loading progress after restoring state
-            binding.loadingProgress.visibility = View.GONE
-        } ?: run {
-            // Only load initial URL if no state to restore
-            val initialUrl = homeViewModel.currentUrl.value
-            if (!initialUrl.isNullOrEmpty() && currentLoadedUrl.isEmpty()) {
-                Log.d("HomeFragment", "Loading initial URL: $initialUrl")
-                binding.webView.loadUrl(initialUrl)
-                currentLoadedUrl = initialUrl
-            }
-        }
-        
-        // Track if network status has been shown to avoid repeated notifications
-        var hasShownDetectionFailureNotice = false
-        var previousNetworkType = ""
-        
-        // Observe network type changes (this is what should trigger URL changes)
-        homeViewModel.isHomeNetwork.observe(viewLifecycleOwner) { isHome ->
-            val currentType = if (isHome) "Internal" else "External"
-            
-            // Only process if the network type actually changed
-            if (currentType != previousNetworkType) {
-                Log.d("HomeFragment", "Network type changed from '$previousNetworkType' to '$currentType'")
-                previousNetworkType = currentType
-                
-                // Get the current URL
-                val url = homeViewModel.currentUrl.value ?: return@observe
-                
-                // Reload WebView when network changes (even if URL is the same)
-                Log.d("HomeFragment", "Network changed - refreshing page with URL: $url")
-                
-                // Stop any current loading before switching/refreshing
-                binding.webView.stopLoading()
-                
-                // Clear the WebView cache to avoid stale content
-                binding.webView.clearCache(false)
-                
-                // Small delay to ensure clean transition
-                binding.webView.postDelayed({
-                    if (url != currentLoadedUrl) {
-                        // URL changed - load the new URL
-                        binding.webView.loadUrl(url)
-                        currentLoadedUrl = url
-                    } else {
-                        // Same URL - just refresh
-                        binding.webView.reload()
-                    }
-                }, 300)
-                
-                // Show loading indicator during transition
-                binding.loadingProgress.visibility = View.VISIBLE
-                
-                // Show a notification about the network change
-                displayNetworkInfo(quiet = false)
-            }
-        }
-        
-        // Make sure we load the initial URL
-        homeViewModel.currentUrl.observe(viewLifecycleOwner) { url ->
-            // This is just for initial loading - network changes are handled above
-            if (currentLoadedUrl.isEmpty() && !url.isNullOrEmpty()) {
-                Log.d("HomeFragment", "Initial URL load: $url")
-                binding.webView.loadUrl(url)
-                currentLoadedUrl = url
-            }
-        }
-        
-        // Track previous connection state to avoid duplicate messages
-        var previousConnectionState = true
-        var previousNetworkSsid = ""
-        var networkTransitionInProgress = false
-        
-        // Only show disconnection notifications when actually disconnected
-        homeViewModel.isConnected.observe(viewLifecycleOwner) { isConnected ->
-            if (!isConnected && previousConnectionState && !networkTransitionInProgress) {
-                // Only show if we transitioned from connected to disconnected and not in transition
-                Log.d("HomeFragment", "Network connection lost")
-                // Don't show message during network transitions
-            }
-            previousConnectionState = isConnected
-        }
-        
-        // Also observe network changes to catch WiFi to mobile transitions
-        homeViewModel.currentNetwork.observe(viewLifecycleOwner) { network ->
-            // Extract the actual SSID from the network string
-            val ssid = when {
-                network?.startsWith("Home: ") == true -> network.removePrefix("Home: ")
-                network?.startsWith("External: ") == true -> network.removePrefix("External: ")
-                network == "Not Connected" -> ""
-                else -> network ?: ""
-            }
-            
-            Log.d("HomeFragment", "Network changed from '$previousNetworkSsid' to '$ssid'")
-            
-            // Check if we switched from WiFi to mobile (SSID becomes empty) or between WiFi networks
-            if (previousNetworkSsid.isNotEmpty() && ssid.isEmpty()) {
-                // Switched from WiFi to mobile data
-                Log.d("HomeFragment", "Switched from WiFi to mobile data - loading external URL")
-                
-                // Mark transition in progress
-                networkTransitionInProgress = true
-                
-                // Force network check to update URL
-                homeViewModel.checkNetworkStatus()
-                
-                // Wait for network to stabilize before loading
-                binding.webView.postDelayed({
-                    // Get the updated URL (should be external now)
-                    val newUrl = homeViewModel.currentUrl.value
-                    if (newUrl != null && newUrl != currentLoadedUrl) {
-                        binding.webView.loadUrl(newUrl)
-                        currentLoadedUrl = newUrl
-                    } else {
-                        binding.webView.reload()
-                    }
-                    binding.loadingProgress.visibility = View.VISIBLE
-                    
-                    // Clear transition flag after a delay
-                    binding.webView.postDelayed({
-                        networkTransitionInProgress = false
-                    }, 2000)
-                }, 1000) // Increased delay for network stabilization
-                
-            } else if (previousNetworkSsid != ssid && previousNetworkSsid.isNotEmpty() && ssid.isNotEmpty()) {
-                // Switched between different WiFi networks
-                Log.d("HomeFragment", "Switched between WiFi networks - checking if URL needs update")
-                
-                // Mark transition in progress
-                networkTransitionInProgress = true
-                
-                // Force network check to update URL if needed
-                homeViewModel.checkNetworkStatus()
-                
-                // Wait for network to stabilize before loading
-                binding.webView.postDelayed({
-                    // Get the potentially updated URL
-                    val newUrl = homeViewModel.currentUrl.value
-                    if (newUrl != null && newUrl != currentLoadedUrl) {
-                        binding.webView.loadUrl(newUrl)
-                        currentLoadedUrl = newUrl
-                    } else {
-                        binding.webView.reload()
-                    }
-                    binding.loadingProgress.visibility = View.VISIBLE
-                    
-                    // Clear transition flag after a delay
-                    binding.webView.postDelayed({
-                        networkTransitionInProgress = false
-                    }, 2000)
-                }, 1000) // Increased delay for network stabilization
-            }
-            
-            previousNetworkSsid = ssid
-        }
-        
-        // Observe network changes but limit notifications
-        homeViewModel.currentNetwork.observe(viewLifecycleOwner) { ssid ->
-            Log.d("HomeFragment", "Current network changed: '$ssid'")
-            
-            // Use NetworkUtils to get the most reliable display SSID
-            val displaySsid = if (ssid == null || ssid == "Current WiFi" || ssid == "<unknown ssid>" || ssid.isEmpty()) {
-                // Try to get SSID directly using NetworkUtils' reliable detection
-                val detectedSsid = networkUtils.getSsidWithBestMethod()
-                
-                if (detectedSsid != null && detectedSsid != "<unknown ssid>") {
-                    // Success! Use the detected SSID
-                    detectedSsid
-                } else {
-                    // Check for manual override
-                    val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-                    val manualOverride = prefs.getString("manual_home_network", "") ?: ""
-                    
-                    if (manualOverride.isNotEmpty()) {
-                        // Use manual override if set
-                        manualOverride
-                    } else {
-                        // Get home networks
-                        val homeNetworks = prefs.getStringSet("home_wifi_networks", emptySet()) ?: emptySet()
-                        if (homeNetworks.isNotEmpty()) {
-                            // Use first home network name if available
-                            homeNetworks.first()
-                        } else {
-                            // If all else fails, default to URL type
-                            if (networkUtils.isHomeNetwork()) "Home WiFi" else "External WiFi"
-                        }
-                    }
-                }
-            } else {
-                ssid ?: ""
-            }
-            
-            // Use the cleaned-up display SSID but only log it, don't show notification
-            // This prevents constant notifications
-            Log.d("HomeFragment", "Prepared display SSID: $displaySsid")
-            
-            // Get manual override to check if it's set
-            val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-            val manualOverride = prefs.getString("manual_home_network", "") ?: ""
-            
-            // Only show the help notification if:
-            // 1. We have a detection failure
-            // 2. We haven't shown the notice yet
-            // 3. Manual override is NOT set
-            if (!hasShownDetectionFailureNotice && 
-                manualOverride.isEmpty() && 
-                (ssid == "Current WiFi" || ssid?.contains("Failed") == true || ssid == "WiFi (Permission Issue)")
-            ) {
-                // Show a single Snackbar instead of both Toast and Snackbar
-                Snackbar.make(
-                    binding.root,
-                    "WiFi name detection failed. This is common on Android 13+.\nTap Settings to enter your WiFi name manually.",
-                    Snackbar.LENGTH_LONG
-                ).setAction("Settings") {
-                    requireActivity().findNavController(R.id.nav_host_fragment_content_main)
-                        .navigate(R.id.nav_settings)
-                }.show()
-                
-                // Mark that we've shown the notice
-                hasShownDetectionFailureNotice = true
-            }
-        }
-        
-        return root
     }
     
-    override fun onResume() {
-        super.onResume()
+    // Notification permission method removed - app doesn't use notifications
+    
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        binding.webView.saveState(outState)
+    }
+    
+    override fun onViewStateRestored(savedInstanceState: Bundle?) {
+        super.onViewStateRestored(savedInstanceState)
+        if (savedInstanceState != null) {
+            binding.webView.restoreState(savedInstanceState)
+        }
+    }
+    
+    override fun onDestroyView() {
+        super.onDestroyView()
+        fileUploadCallback?.onReceiveValue(null)
+        fileUploadCallback = null
         
-        // Check if WebView needs to be resumed (with null safety)
-        _binding?.webView?.onResume()
-        
-        // Apply "Keep screen on" setting to the WebView
-        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
-        val keepScreenOn = prefs.getBoolean("keep_screen_on", false)
-        _binding?.webView?.keepScreenOn = keepScreenOn
-        
-        // Check if we already have a URL loaded
-        if (currentLoadedUrl.isNotEmpty()) {
-            // We have a URL loaded, just make sure the loading progress is hidden
-            _binding?.loadingProgress?.visibility = View.GONE
-            Log.d("HomeFragment", "onResume - already loaded: $currentLoadedUrl")
-            return
+        binding.webView.run {
+            clearHistory()
+            clearCache(true)
+            loadUrl("about:blank")
+            onPause()
+            removeAllViews()
+            destroy()
         }
         
-        // First time load - ensure we load the initial URL
-        val url = homeViewModel.currentUrl.value
-        if (!url.isNullOrEmpty()) {
-            Log.d("HomeFragment", "Loading initial URL: $url")
-            _binding?.webView?.loadUrl(url)
-            currentLoadedUrl = url
+        _binding = null
+    }
+    
+    fun refreshNetworkStatus() {
+        activity?.runOnUiThread {
+            try {
+                networkUtils.checkStatus()
+                networkUtils.checkStatus()
+                
+                val currentUrl = homeViewModel.currentUrl.value
+                Log.d(TAG, "Current URL from HomeViewModel: $currentUrl")
+                Log.d(TAG, "Current loaded URL: $currentLoadedUrl")
+                Log.d(TAG, "WebView current URL: ${binding.webView.url}")
+                
+                if (currentUrl != binding.webView.url && currentUrl != null) {
+                    Log.d(TAG, "URL mismatch - forcing reload to: $currentUrl")
+                    binding.webView.loadUrl(currentUrl)
+                    currentLoadedUrl = currentUrl
+                }
+                
+                // Toast removed - unnecessary notification
+            } catch (e: Exception) {
+                Log.e(TAG, "Error refreshing network status", e)
+                // Toast removed - error already logged
+            }
         }
+    }
+    
+    fun forceNetworkRefresh() {
+        activity?.runOnUiThread {
+            try {
+                Log.d(TAG, "Force network refresh requested")
+                
+                networkUtils.checkStatus()
+                
+                val currentUrl = homeViewModel.currentUrl.value
+                val ssid = networkUtils.getSsid()
+                val isHomeNetwork = networkUtils.isHome()
+                val sharedPrefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+                val internalUrl = sharedPrefs.getString("internal_url", "http://frigate.local") ?: "http://frigate.local"
+                val externalUrl = sharedPrefs.getString("external_url", "https://example.com/frigate") ?: "https://example.com/frigate"
+                val expectedUrl = if (isHomeNetwork) internalUrl else externalUrl
+                
+                Log.d(TAG, "Force refresh details:")
+                Log.d(TAG, "- Current SSID: $ssid")
+                Log.d(TAG, "- Is home network: $isHomeNetwork")
+                Log.d(TAG, "- Current URL: $currentUrl")
+                Log.d(TAG, "- Expected URL: $expectedUrl")
+                Log.d(TAG, "- Current loaded URL: $currentLoadedUrl")
+                Log.d(TAG, "- WebView current URL: ${binding.webView.url}")
+                
+                if (expectedUrl != currentLoadedUrl) {
+                    Log.d(TAG, "URL mismatch detected - forcing reload to: $expectedUrl")
+                    binding.webView.loadUrl(expectedUrl)
+                    currentLoadedUrl = expectedUrl
+                    
+                    Toast.makeText(
+                        context,
+                        "Switching to ${if (isHomeNetwork) "internal" else "external"} URL",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                } else {
+                    Log.d(TAG, "URL is already correct - performing regular reload")
+                    binding.webView.reload()
+                    
+                    // Toast removed - unnecessary notification
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error during force network refresh", e)
+                // Toast removed - error already logged
+            }
+        }
+    }
+    
+    fun injectFullscreenButton(jsCode: String) {
+        activity?.runOnUiThread {
+            try {
+                binding.webView.evaluateJavascript(jsCode) { result ->
+                    if (result != null) {
+                        Log.d(TAG, "Fullscreen button injection result: $result")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error injecting fullscreen button", e)
+            }
+        }
+    }
+    
+    fun handleExitApp() {
+        activity?.finishAffinity()
+        exitProcess(0)
+    }
+    
+    private fun setupBackPressedCallback() {
+        val callback = object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (binding.webView.canGoBack()) {
+                    binding.webView.goBack()
+                } else {
+                    // No more history, exit the app
+                    handleExitApp()
+                }
+            }
+        }
+        requireActivity().onBackPressedDispatcher.addCallback(viewLifecycleOwner, callback)
     }
     
     /**
-     * Displays network and URL information in a Snackbar
-     * Shows WiFi name, URL type, and provides quick access to settings
-     * @param overrideSsid Optional SSID to display instead of the current one
-     * @param quiet If true, will only log the information without showing a Snackbar
+     * Checks if network is available and connected before proceeding with a URL load
+     * Uses a timeout to prevent indefinite waiting
+     * Also verifies DNS resolution is working properly
      */
-    private fun displayNetworkInfo(overrideSsid: String? = null, quiet: Boolean = true) {
-        // Use override SSID if provided, otherwise get from view model
-        val ssid = overrideSsid ?: homeViewModel.currentNetwork.value ?: ""
-        val isHome = homeViewModel.isHomeNetwork.value ?: false
-        val isConnected = homeViewModel.isConnected.value ?: false
-        val currentUrl = homeViewModel.currentUrl.value ?: "No URL"
-        
-        val urlType = if (isHome) "Internal" else "External"
-        
-        // Get current status and log for debugging
-        Log.d("HomeFragment", "Raw SSID value: '$ssid'")
-        Log.d("HomeFragment", "Home network: $isHome, Connected: $isConnected, Using URL: $currentUrl")
-        
-        // Check for the special "Current WiFi" or "Auto-detection Failed" cases
-        val isAutoDetectionFailed = ssid.contains("Failed") || ssid == "Current WiFi" || ssid == "WiFi (Permission Issue)"
-        
-        val message = when {
-            !isConnected -> "No internet connection\nCheck your network settings"
-            isAutoDetectionFailed -> "Using $urlType URL\nWiFi auto-detection failed\nGo to Settings to set manual WiFi name"
-            ssid.isNotEmpty() -> "Using $urlType URL\nConnected to: $ssid"
-            else -> "Using $urlType URL\nNo WiFi connected"
+    private fun checkNetworkConnectivity(callback: (Boolean) -> Unit) {
+        val cm = requireContext().getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        if (cm == null) {
+            Log.e(TAG, "ConnectivityManager is null")
+            callback(false)
+            return
         }
         
-        Log.d("HomeFragment", "URL status: Using $urlType URL ($currentUrl), SSID=$ssid, Connected=$isConnected")
+        // Get the active network and capabilities
+        val activeNetwork = cm.activeNetwork
+        val capabilities = activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        val hasInternetCapability = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        val hasValidatedCapability = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
         
-        // Only show the Snackbar if not in quiet mode
-        if (!quiet) {
-            Snackbar.make(binding.root, message, Snackbar.LENGTH_LONG)
-                .setAction("Settings") {
-                    // Navigate to settings
-                    requireActivity().findNavController(R.id.nav_host_fragment_content_main)
-                        .navigate(R.id.nav_settings)
-                }.show()
+        // If there's already connectivity, do a DNS resolution test to ensure it's fully functional
+        if (hasInternetCapability && hasValidatedCapability) {
+            Log.d(TAG, "Network appears to be available - testing DNS resolution")
+            
+            // Set up a timeout for the DNS check
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            val timeoutRunnable = Runnable {
+                Log.d(TAG, "DNS resolution test timed out - network might not be fully ready")
+                callback(false)
+            }
+            
+            // Give the DNS check 3 seconds to complete
+            handler.postDelayed(timeoutRunnable, 3000)
+            
+            // Run a DNS test in a background thread
+            Thread {
+                try {
+                    // Try to resolve a reliable domain (google.com)
+                    val inetAddress = java.net.InetAddress.getByName("google.com")
+                    val hostAddress = inetAddress.hostAddress
+                    
+                    Log.d(TAG, "DNS resolution successful: google.com -> $hostAddress")
+                    
+                    // Remove the timeout and report success
+                    handler.removeCallbacks(timeoutRunnable)
+                    
+                    // Add a small delay to ensure the network stack is fully ready
+                    handler.postDelayed({
+                        callback(true)
+                    }, 1000)
+                } catch (e: Exception) {
+                    Log.e(TAG, "DNS resolution failed: ${e.message}")
+                    
+                    // DNS failed - wait a bit longer and try again once more
+                    try {
+                        // Wait a moment and try another domain
+                        Thread.sleep(1500)
+                        val backupAddress = java.net.InetAddress.getByName("cloudflare.com")
+                        Log.d(TAG, "Backup DNS resolution successful: cloudflare.com -> ${backupAddress.hostAddress}")
+                        
+                        handler.removeCallbacks(timeoutRunnable)
+                        handler.post { callback(true) }
+                    } catch (e2: Exception) {
+                        Log.e(TAG, "Backup DNS resolution also failed: ${e2.message}")
+                        handler.removeCallbacks(timeoutRunnable)
+                        handler.post { callback(false) }
+                    }
+                }
+            }.start()
+            
+            return
+        }
+        
+        // No immediate connectivity, wait for it with a timeout
+        Log.d(TAG, "Network not immediately available, waiting with timeout")
+        
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        val timeoutRunnable = Runnable {
+            Log.d(TAG, "Network connectivity check timed out after ${NETWORK_CHECK_TIMEOUT_MS}ms")
+            callback(false)
+        }
+        
+        // Set a timeout to prevent indefinite waiting
+        handler.postDelayed(timeoutRunnable, NETWORK_CHECK_TIMEOUT_MS)
+        
+        // Register a one-time network callback
+        val networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                Log.d(TAG, "Network became available during check")
+                
+                // Instead of immediately calling back, do a DNS check
+                handler.removeCallbacks(timeoutRunnable)
+                
+                // Wait a bit for DNS to be fully operational (mobile networks need this)
+                handler.postDelayed({
+                    // Run a DNS resolution test
+                    Thread {
+                        try {
+                            val inetAddress = java.net.InetAddress.getByName("google.com")
+                            Log.d(TAG, "DNS resolution successful after network became available")
+                            
+                            handler.post {
+                                callback(true)
+                                try {
+                                    cm.unregisterNetworkCallback(this)
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "Error unregistering callback: ${e.message}")
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "DNS resolution failed after network became available: ${e.message}")
+                            
+                            // Try once more after a delay
+                            try {
+                                Thread.sleep(2000)
+                                val backupAddress = java.net.InetAddress.getByName("cloudflare.com")
+                                Log.d(TAG, "Backup DNS resolution successful after retry")
+                                
+                                handler.post {
+                                    callback(true)
+                                    try {
+                                        cm.unregisterNetworkCallback(this)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error unregistering callback: ${e.message}")
+                                    }
+                                }
+                            } catch (e2: Exception) {
+                                Log.e(TAG, "Backup DNS resolution also failed: ${e2.message}")
+                                handler.post {
+                                    callback(false)
+                                    try {
+                                        cm.unregisterNetworkCallback(this)
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Error unregistering callback: ${e.message}")
+                                    }
+                                }
+                            }
+                        }
+                    }.start()
+                }, 2000) // Wait 2 seconds for DNS to be operational
+            }
+            
+            override fun onLost(network: Network) {
+                // Network lost during check period
+                Log.d(TAG, "Network lost during connectivity check")
+            }
+            
+            override fun onUnavailable() {
+                Log.d(TAG, "Network declared unavailable during check")
+                handler.removeCallbacks(timeoutRunnable)
+                callback(false)
+                try {
+                    cm.unregisterNetworkCallback(this)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error unregistering callback: ${e.message}")
+                }
+            }
+        }
+        
+        try {
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, networkCallback)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error registering network callback: ${e.message}")
+            handler.removeCallbacks(timeoutRunnable)
+            callback(false)
         }
     }
     
     override fun onPause() {
         super.onPause()
-        // Save WebView state before pausing
-        _binding?.webView?.let { webView ->
-            webViewState = Bundle()
-            webView.saveState(webViewState!!)
-            webView.onPause()
-        }
+        binding.webView.onPause()
     }
     
-    override fun onSaveInstanceState(outState: Bundle) {
-        super.onSaveInstanceState(outState)
-        // Save the WebView state if available
-        webViewState?.let {
-            outState.putBundle("webViewState", it)
-        }
-        outState.putString("currentLoadedUrl", currentLoadedUrl)
-    }
-
-    
-    override fun onDestroyView() {
-        super.onDestroyView()
-        binding.webView.stopLoading()
-        binding.webView.destroy()
-        _binding = null
+    override fun onResume() {
+        super.onResume()
+        binding.webView.onResume()
     }
     
-    /**
-     * Handle back press for WebView navigation
-     * @return true if the back press was handled, false otherwise
-     */
-    fun handleBackPress(): Boolean {
-        val webView = _binding?.webView
-        if (webView != null && webView.canGoBack()) {
-            webView.goBack()
-            return true
+    private fun getDefaultLauncherPackageName(context: Context): String? {
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
         }
-        return false
+        val resolveInfo = context.packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+        return resolveInfo?.activityInfo?.packageName
+    }
+    
+    private fun isAppSetAsDefaultLauncher(context: Context): Boolean {
+        val packageName = context.packageName
+        val defaultLauncherPackageName = getDefaultLauncherPackageName(context)
+        return packageName == defaultLauncherPackageName
+    }
+    
+    override fun onStop() {
+        super.onStop()
+        binding.swipeRefresh.isEnabled = false
+    }
+    
+    override fun onStart() {
+        super.onStart()
+        
+        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        val isGestureEnabled = prefs.getBoolean("enable_gesture_refresh", false)
+        binding.swipeRefresh.isEnabled = isGestureEnabled
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        try {
+            WebView(requireContext()).destroy()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }

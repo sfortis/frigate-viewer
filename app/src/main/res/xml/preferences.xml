@@ -13,7 +13,7 @@
             android:title="Internal URL"
             android:summary="URL when on home network"
             android:defaultValue="http://192.168.1.100:5000"
-            android:inputType="textUri"
+            android:inputType="textUri|textNoSuggestions"
             android:importantForAutofill="no"
             app:iconSpaceReserved="false" />
 
@@ -24,7 +24,7 @@
             android:title="External URL"
             android:summary="URL when not on home network"
             android:defaultValue="https://example.com/frigate"
-            android:inputType="textUri"
+            android:inputType="textUri|textNoSuggestions"
             android:importantForAutofill="no"
             app:iconSpaceReserved="false" />
     </PreferenceCategory>
@@ -66,6 +66,31 @@
             android:title="Keep screen on"
             android:summary="Prevent screen from turning off while app is open"
             android:defaultValue="false"
+            app:iconSpaceReserved="false" />
+            
+    </PreferenceCategory>
+    
+    <PreferenceCategory
+        android:title="Advanced"
+        app:iconSpaceReserved="false">
+        
+        <SwitchPreferenceCompat
+            android:key="use_custom_user_agent"
+            android:title="Use custom User Agent"
+            android:summary="Enable to set a custom browser User Agent string"
+            android:defaultValue="false"
+            app:iconSpaceReserved="false" />
+            
+        <EditTextPreference
+            android:key="custom_user_agent"
+            android:selectAllOnFocus="true"
+            android:singleLine="true"
+            android:title="Custom User Agent"
+            android:summary="Browser User Agent string to use"
+            android:defaultValue="Mozilla/5.0 (Linux; Android) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36"
+            android:inputType="text|textNoSuggestions"
+            android:importantForAutofill="no"
+            android:dependency="use_custom_user_agent"
             app:iconSpaceReserved="false" />
             
     </PreferenceCategory>

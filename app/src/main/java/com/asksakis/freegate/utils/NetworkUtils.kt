@@ -23,22 +23,31 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
- * Comprehensive utility class to manage network detection and URL selection.
- * Combines functionality from both NetworkUtils and NetworkFixer for simplicity.
+ * Manages network detection and URL selection
  */
-class NetworkUtils(private val context: Context) {
-
+class NetworkUtils private constructor(private val context: Context) {
+    
     companion object {
         private const val TAG = "NetworkUtils"
         private val FLAG_INCLUDE_LOCATION_INFO = 
             ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO
+        
+        @Volatile
+        private var INSTANCE: NetworkUtils? = null
+        
+        fun getInstance(context: Context): NetworkUtils {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: NetworkUtils(context.applicationContext).also { 
+                    INSTANCE = it 
+                }
+            }
+        }
     }
     
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private val wifiNetworkManager = WifiNetworkManager(context)
     private val prefs: SharedPreferences = PreferenceManager.getDefaultSharedPreferences(context)
     
-    // LiveData for observers
     private val _isHomeNetwork = MutableLiveData<Boolean>()
     val isHomeNetwork: LiveData<Boolean> = _isHomeNetwork
     
@@ -48,24 +57,20 @@ class NetworkUtils(private val context: Context) {
     private val _isConnected = MutableLiveData<Boolean>()
     val isConnected: LiveData<Boolean> = _isConnected
     
-    // URL LiveData to allow observing URL changes
     private val _currentUrl = MutableLiveData<String?>()
     val currentUrl: LiveData<String?> = _currentUrl
     
-    // Network callback for auto-refreshing on network changes
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     init {
-        // Initialize with a status check and register for network changes
-        checkNetworkStatus()
-        registerNetworkCallback()
+        checkStatus()
+        registerCallback()
     }
     
     /**
-     * Registers for network callbacks to automatically refresh when network changes
-     * Includes logic to detect when we leave a home network
+     * Registers for network callbacks to detect network changes
      */
-    private fun registerNetworkCallback() {
+    private fun registerCallback() {
         if (networkCallback != null) {
             return
         }
@@ -75,23 +80,26 @@ class NetworkUtils(private val context: Context) {
             .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
             .build()
         
-        // Track previous state to detect changes    
         var wasOnWifi = false
         var wasOnHomeNetwork = false
             
         networkCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            // For Android 12+ (API 31+), use FLAG_INCLUDE_LOCATION_INFO
             object : ConnectivityManager.NetworkCallback(FLAG_INCLUDE_LOCATION_INFO) {
                 override fun onAvailable(network: Network) {
                     Log.d(TAG, "Network available")
-                    val oldUrl = _currentUrl.value
-                    checkNetworkStatus()
-                    val newUrl = getAppropriateUrl()
-                    _currentUrl.postValue(newUrl)
                     
-                    // Log URL change for debugging
-                    if (oldUrl != newUrl) {
-                        Log.d(TAG, "URL changed from $oldUrl to $newUrl")
+                    CoroutineScope(Dispatchers.IO).launch {
+                        // Wait a bit for the network to stabilize
+                        delay(500)
+                        
+                        val oldUrl = _currentUrl.value
+                        checkStatus()
+                        val newUrl = getUrl()
+                        _currentUrl.postValue(newUrl)
+                        
+                        if (oldUrl != newUrl) {
+                            Log.d(TAG, "URL changed from $oldUrl to $newUrl")
+                        }
                     }
                 }
 
@@ -100,13 +108,11 @@ class NetworkUtils(private val context: Context) {
                     _isHomeNetwork.postValue(false)
                     _currentSsid.postValue("")
                     
-                    // If we were on a home network before, update URL to external
                     if (wasOnHomeNetwork) {
                         Log.d(TAG, "Lost connection to home network - switching to external URL")
                         _currentUrl.postValue(getExternalUrl())
                     }
                     
-                    // Update tracking state
                     wasOnWifi = false
                     wasOnHomeNetwork = false
                 }
@@ -115,50 +121,61 @@ class NetworkUtils(private val context: Context) {
                     network: Network,
                     networkCapabilities: NetworkCapabilities
                 ) {
-                    // Check for WiFi transport change
                     val isOnWifi = networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                     
-                    // Only process if WiFi state changed or we haven't checked yet
                     if (isOnWifi != wasOnWifi) {
                         Log.d(TAG, "WiFi state changed: $wasOnWifi -> $isOnWifi")
                         
-                        // Get current URL before update
                         val oldUrl = _currentUrl.value
                         
-                        // Add a small delay to allow network to configure
                         CoroutineScope(Dispatchers.IO).launch {
                             if (!isOnWifi && wasOnWifi) {
-                                // WiFi just disconnected - immediate switch to external
-                                Log.d(TAG, "WiFi disconnected - switching to external URL")
+                                Log.d(TAG, "WiFi disconnected - waiting for mobile data to be available")
+                                
+                                // Wait for mobile data to establish connection
+                                delay(1000)
+                                
+                                // Check if we have internet connectivity
+                                var retries = 0
+                                while (retries < 5) {
+                                    val activeNetwork = connectivityManager.activeNetwork
+                                    val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+                                    val hasInternet = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
+                                                     capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                                    
+                                    if (hasInternet) {
+                                        Log.d(TAG, "Mobile data is available - switching to external URL")
+                                        break
+                                    }
+                                    
+                                    Log.d(TAG, "Waiting for mobile data... (attempt ${retries + 1}/5)")
+                                    delay(1000)
+                                    retries++
+                                }
+                                
                                 _currentUrl.postValue(getExternalUrl())
                                 _isHomeNetwork.postValue(false)
                                 _currentSsid.postValue("")
-                                checkNetworkStatus()
+                                checkStatus()
                             } else if (isOnWifi && !wasOnWifi) {
-                                // WiFi just connected - add delay for SSID detection
                                 Log.d(TAG, "WiFi connected - waiting for network to stabilize")
-                                delay(2000) // 2 second delay for better SSID detection
-                                checkNetworkStatus()
+                                delay(2000)
+                                checkStatus()
                             } else if (isOnWifi && wasOnWifi) {
-                                // WiFi-to-WiFi transition - add shorter delay
                                 Log.d(TAG, "WiFi network changed - checking new network")
-                                delay(1000) // 1 second delay
-                                checkNetworkStatus()
+                                delay(1000)
+                                checkStatus()
                             }
                         }
                         
-                        // Check if it's a home network after status update
                         if (isOnWifi) {
-                            // WiFi connected, check if it's a home network
-                            val isNowOnHomeNetwork = isHomeNetwork()
+                            val isNowOnHomeNetwork = isHome()
                             
-                            // If home network state changed, update URL
                             if (isNowOnHomeNetwork != wasOnHomeNetwork) {
                                 Log.d(TAG, "Home network state changed: $wasOnHomeNetwork -> $isNowOnHomeNetwork")
-                                val newUrl = getAppropriateUrl()
+                                val newUrl = getUrl()
                                 _currentUrl.postValue(newUrl)
                                 
-                                // Log URL change
                                 if (oldUrl != newUrl) {
                                     Log.d(TAG, "URL changed from $oldUrl to $newUrl due to network change")
                                 }
@@ -166,24 +183,27 @@ class NetworkUtils(private val context: Context) {
                             wasOnHomeNetwork = isNowOnHomeNetwork
                         }
                         
-                        // Update tracking state
                         wasOnWifi = isOnWifi
                     }
                 }
             }
         } else {
-            // For older versions
             object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
                     Log.d(TAG, "Network available")
-                    val oldUrl = _currentUrl.value
-                    checkNetworkStatus()
-                    val newUrl = getAppropriateUrl()
-                    _currentUrl.postValue(newUrl)
                     
-                    // Log URL change for debugging
-                    if (oldUrl != newUrl) {
-                        Log.d(TAG, "URL changed from $oldUrl to $newUrl")
+                    CoroutineScope(Dispatchers.IO).launch {
+                        // Wait a bit for the network to stabilize
+                        delay(500)
+                        
+                        val oldUrl = _currentUrl.value
+                        checkStatus()
+                        val newUrl = getUrl()
+                        _currentUrl.postValue(newUrl)
+                        
+                        if (oldUrl != newUrl) {
+                            Log.d(TAG, "URL changed from $oldUrl to $newUrl")
+                        }
                     }
                 }
 
@@ -192,13 +212,11 @@ class NetworkUtils(private val context: Context) {
                     _isHomeNetwork.postValue(false)
                     _currentSsid.postValue("")
                     
-                    // If we were on a home network before, update URL to external
                     if (wasOnHomeNetwork) {
                         Log.d(TAG, "Lost connection to home network - switching to external URL")
                         _currentUrl.postValue(getExternalUrl())
                     }
                     
-                    // Update tracking state
                     wasOnWifi = false
                     wasOnHomeNetwork = false
                 }
@@ -207,50 +225,61 @@ class NetworkUtils(private val context: Context) {
                     network: Network,
                     networkCapabilities: NetworkCapabilities
                 ) {
-                    // Check for WiFi transport change
                     val isOnWifi = networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
                     
-                    // Only process if WiFi state changed or we haven't checked yet
                     if (isOnWifi != wasOnWifi) {
                         Log.d(TAG, "WiFi state changed: $wasOnWifi -> $isOnWifi")
                         
-                        // Get current URL before update
                         val oldUrl = _currentUrl.value
                         
-                        // Add a small delay to allow network to configure
                         CoroutineScope(Dispatchers.IO).launch {
                             if (!isOnWifi && wasOnWifi) {
-                                // WiFi just disconnected - immediate switch to external
-                                Log.d(TAG, "WiFi disconnected - switching to external URL")
+                                Log.d(TAG, "WiFi disconnected - waiting for mobile data to be available")
+                                
+                                // Wait for mobile data to establish connection
+                                delay(1000)
+                                
+                                // Check if we have internet connectivity
+                                var retries = 0
+                                while (retries < 5) {
+                                    val activeNetwork = connectivityManager.activeNetwork
+                                    val capabilities = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
+                                    val hasInternet = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true &&
+                                                     capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                                    
+                                    if (hasInternet) {
+                                        Log.d(TAG, "Mobile data is available - switching to external URL")
+                                        break
+                                    }
+                                    
+                                    Log.d(TAG, "Waiting for mobile data... (attempt ${retries + 1}/5)")
+                                    delay(1000)
+                                    retries++
+                                }
+                                
                                 _currentUrl.postValue(getExternalUrl())
                                 _isHomeNetwork.postValue(false)
                                 _currentSsid.postValue("")
-                                checkNetworkStatus()
+                                checkStatus()
                             } else if (isOnWifi && !wasOnWifi) {
-                                // WiFi just connected - add delay for SSID detection
                                 Log.d(TAG, "WiFi connected - waiting for network to stabilize")
-                                delay(2000) // 2 second delay for better SSID detection
-                                checkNetworkStatus()
+                                delay(2000)
+                                checkStatus()
                             } else if (isOnWifi && wasOnWifi) {
-                                // WiFi-to-WiFi transition - add shorter delay
                                 Log.d(TAG, "WiFi network changed - checking new network")
-                                delay(1000) // 1 second delay
-                                checkNetworkStatus()
+                                delay(1000)
+                                checkStatus()
                             }
                         }
                         
-                        // Check if it's a home network after status update
                         if (isOnWifi) {
-                            // WiFi connected, check if it's a home network
-                            val isNowOnHomeNetwork = isHomeNetwork()
+                            val isNowOnHomeNetwork = isHome()
                             
-                            // If home network state changed, update URL
                             if (isNowOnHomeNetwork != wasOnHomeNetwork) {
                                 Log.d(TAG, "Home network state changed: $wasOnHomeNetwork -> $isNowOnHomeNetwork")
-                                val newUrl = getAppropriateUrl()
+                                val newUrl = getUrl()
                                 _currentUrl.postValue(newUrl)
                                 
-                                // Log URL change
                                 if (oldUrl != newUrl) {
                                     Log.d(TAG, "URL changed from $oldUrl to $newUrl due to network change")
                                 }
@@ -258,7 +287,6 @@ class NetworkUtils(private val context: Context) {
                             wasOnHomeNetwork = isNowOnHomeNetwork
                         }
                         
-                        // Update tracking state
                         wasOnWifi = isOnWifi
                     }
                 }
@@ -269,224 +297,21 @@ class NetworkUtils(private val context: Context) {
         Log.d(TAG, "Registered network callback for connectivity changes")
     }
     
-    fun unregisterNetworkCallback() {
+    fun unregisterCallback() {
         networkCallback?.let {
             connectivityManager.unregisterNetworkCallback(it)
             networkCallback = null
         }
     }
     
-    suspend fun getWifiSsidAsync(): String? {
-        return wifiNetworkManager.getWifiSsidAsync()
-    }
-    
-    /**
-     * Modern approach using coroutines to get WiFi SSID
-     * This function attempts to force WiFi binding for better SSID access
-     */
-    fun forceWifiConnection(): String? {
-        try {
-            android.util.Log.d("NetworkUtils", "========== FORCE WIFI CONNECTION START ==========")
-            
-            // First check if the device is even connected to WiFi
-            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            val activeNetwork = cm.activeNetwork
-            val capabilities = activeNetwork?.let { cm.getNetworkCapabilities(it) }
-            val isWifiConnected = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-            
-            if (!isWifiConnected) {
-                android.util.Log.d("NetworkUtils", "Not connected to WiFi at all")
-                return null
-            }
-            
-            android.util.Log.d("NetworkUtils", "Device is connected to WiFi")
-            
-            // METHOD 1: Try to get WiFi info via guaranteed system settings on some devices
-            try {
-                // Works reliably on many Samsung, Pixel, and AOSP devices
-                val wifiSsidFromManager = getWifiSsidFromLocalManager()
-                if (wifiSsidFromManager != null) {
-                    android.util.Log.d("NetworkUtils", "Got SSID from local manager: $wifiSsidFromManager")
-                    return wifiSsidFromManager
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("NetworkUtils", "Error getting SSID from local manager: ${e.message}")
-            }
-            
-            // METHOD 2: Try to get SSID from system advanced settings (works on many devices regardless of permissions)
-            try {
-                val settingsSSID = getWifiSsidFromSettings()
-                if (settingsSSID != null) {
-                    android.util.Log.d("NetworkUtils", "Got SSID from system settings: $settingsSSID")
-                    return settingsSSID
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("NetworkUtils", "Error getting SSID from settings: ${e.message}")
-            }
-            
-            // METHOD 3: Use the standard API (requires permissions)
-            try {
-                // Check if we have required permission for Android 13+
-                val hasPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    context.checkSelfPermission(android.Manifest.permission.NEARBY_WIFI_DEVICES) == 
-                        PackageManager.PERMISSION_GRANTED
-                } else {
-                    context.checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
-                        PackageManager.PERMISSION_GRANTED
-                }
-                
-                android.util.Log.d("NetworkUtils", "Has required permission: $hasPermission")
-                
-                if (hasPermission) {
-                    // Try to get WiFi info via the active network
-                    // We know activeNetwork and capabilities are non-null due to earlier checks
-                    // We already verified that we're connected to WiFi with hasTransport above
-                    
-                    // For Android 12+, try to use TransportInfo first
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        val transportInfo = capabilities.transportInfo
-                        android.util.Log.d("NetworkUtils", "Got transportInfo: ${transportInfo != null}")
-                        if (transportInfo is WifiInfo) {
-                            @Suppress("DEPRECATION")
-                            val ssid = transportInfo.ssid?.removeSurrounding("\"")
-                            android.util.Log.d("NetworkUtils", "Raw SSID from TransportInfo: ${transportInfo.ssid}")
-                            
-                            if (ssid != null && ssid != "<unknown ssid>" && ssid.isNotEmpty()) {
-                                android.util.Log.d("NetworkUtils", "Got clean SSID from TransportInfo: $ssid")
-                                return ssid
-                            }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("NetworkUtils", "Error getting SSID with permission methods: ${e.message}")
-            }
-            
-            // METHOD 4: Try with WifiManager directly (deprecated but may work on some devices)
-            try {
-                val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                
-                @Suppress("DEPRECATION")
-                val wifiInfo = wifiManager.connectionInfo
-                
-                android.util.Log.d("NetworkUtils", "WifiInfo from manager: $wifiInfo")
-                
-                if (wifiInfo != null) {
-                    // Check if we're actually connected to a network
-                    if (wifiInfo.networkId != -1) {
-                        @Suppress("DEPRECATION")
-                        val ssid = wifiInfo.ssid?.removeSurrounding("\"")
-                        
-                        android.util.Log.d("NetworkUtils", "SSID from WifiManager: ${wifiInfo.ssid}")
-                        
-                        if (ssid != null && ssid != "<unknown ssid>" && ssid.isNotEmpty()) {
-                            android.util.Log.d("NetworkUtils", "Got clean SSID from WifiManager: $ssid")
-                            return ssid
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("NetworkUtils", "Error getting SSID from WifiManager: ${e.message}")
-            }
-            
-            // METHOD 5: Try using the manual override from preferences
-            try {
-                val prefs = PreferenceManager.getDefaultSharedPreferences(context)
-                val manualOverride = prefs.getString("manual_home_network", "")
-                if (!manualOverride.isNullOrEmpty()) {
-                    android.util.Log.d("NetworkUtils", "Using manual override SSID: $manualOverride")
-                    return manualOverride
-                }
-            } catch (e: Exception) {
-                android.util.Log.e("NetworkUtils", "Error getting manual override: ${e.message}")
-            }
-            
-            android.util.Log.d("NetworkUtils", "========== FORCE WIFI CONNECTION END: NO SSID FOUND ==========")
-            return null
-        } catch (e: Exception) {
-            android.util.Log.e("NetworkUtils", "Error in forceWifiConnection: ${e.message}")
-            return null
-        }
-    }
-    
-    /**
-     * Attempt to get WiFi SSID from system settings (works on many devices)
-     */
-    private fun getWifiSsidFromSettings(): String? {
-        try {
-            // Different methods work on different devices
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            
-            // Check if WiFi is enabled
-            if (!wifiManager.isWifiEnabled) {
-                android.util.Log.d("NetworkUtils", "WiFi is disabled")
-                return null
-            }
-            
-            // Try to read from system settings
-            // This can work even when permissions are missing on many Android devices
-            val settingValue = Settings.System.getString(context.contentResolver, "wifi_ap_ssid")
-            val settingValue2 = Settings.Secure.getString(context.contentResolver, "wifi_ssid")
-            
-            android.util.Log.d("NetworkUtils", "Settings System wifi_ap_ssid: $settingValue")
-            android.util.Log.d("NetworkUtils", "Settings Secure wifi_ssid: $settingValue2")
-            
-            // Return the first valid value
-            if (!settingValue.isNullOrEmpty() && settingValue != "<unknown ssid>") {
-                return settingValue.removeSurrounding("\"")
-            }
-            
-            if (!settingValue2.isNullOrEmpty() && settingValue2 != "<unknown ssid>") {
-                return settingValue2.removeSurrounding("\"")
-            }
-            
-            return null
-        } catch (e: Exception) {
-            android.util.Log.e("NetworkUtils", "Error getting SSID from settings: ${e.message}")
-            return null
-        }
-    }
-    
-    /**
-     * Attempt to get WiFi SSID using local manager (works on many devices)
-     */
-    private fun getWifiSsidFromLocalManager(): String? {
-        try {
-            // Alternative way to get SSID on some devices
-            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            
-            if (!wifiManager.isWifiEnabled) {
-                return null
-            }
-            
-            // Force get SSID using alternative method
-            @Suppress("DEPRECATION")
-            val wifiInfo = wifiManager.connectionInfo
-            
-            if (wifiInfo?.networkId == -1) {
-                return null
-            }
-            
-            // This method sometimes works on devices when others fail
-            @Suppress("DEPRECATION")
-            val ssid = wifiInfo?.ssid?.removeSurrounding("\"")
-            
-            return if (ssid == null || ssid == "<unknown ssid>" || ssid.isEmpty()) {
-                null
-            } else {
-                ssid
-            }
-        } catch (e: Exception) {
-            android.util.Log.e("NetworkUtils", "Error getting SSID from local manager: ${e.message}")
-            return null
-        }
+    suspend fun getSsidAsync(): String? {
+        return getSsid()
     }
     
     /**
      * Checks current network status and updates LiveData
-     * Now also handles automatic URL selection
      */
-    fun checkNetworkStatus() {
+    fun checkStatus() {
         val activeNetwork = connectivityManager.activeNetwork ?: run {
             _isConnected.postValue(false)
             _isHomeNetwork.postValue(false)
@@ -506,46 +331,35 @@ class NetworkUtils(private val context: Context) {
         _isConnected.postValue(isInternetAvailable)
         
         if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-            // Try multiple detection methods in order of reliability
-            // 1. Try our force connection method first (most reliable on newer Android)
-            var ssid = getSsidWithBestMethod()
-            Log.d(TAG, "Best method SSID result: $ssid")
+            var ssid = getSsid()
+            Log.d(TAG, "SSID result: $ssid")
             
-            // 2. Fallback to WifiNetworkManager if method fails
-            if (ssid == null || ssid.isEmpty() || ssid == "<unknown ssid>") {
-                // Force refresh to avoid stale data
+            // If we couldn't get SSID, try through WifiNetworkManager
+            if (ssid.isNullOrEmpty() || ssid == "<unknown ssid>") {
                 wifiNetworkManager.refreshSsid()
                 ssid = wifiNetworkManager.getCurrentSsid()
                 Log.d(TAG, "WifiNetworkManager SSID result: $ssid")
             }
             
-            // 3. Try force connection as another backup
-            // The condition is always true here because of the previous check and assignment
-            // which means ssid can only be null, empty or "<unknown ssid>" at this point
-            ssid = forceWifiConnection()
-            Log.d(TAG, "Force connection SSID result: $ssid")
+            // Check if we have a valid SSID
+            val hasValidSsid = !ssid.isNullOrEmpty() && ssid != "<unknown ssid>"
             
-            if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
-                _currentSsid.postValue(ssid)
+            if (hasValidSsid) {
+                _currentSsid.postValue(ssid!!)
                 
-                // Clean up SSID (Android sometimes adds quotes) for reliable matching
                 val cleanSsid = ssid.trim().removeSurrounding("\"")
                 val isHomeNetworkResult = isNetworkInHomeList(cleanSsid)
                 _isHomeNetwork.postValue(isHomeNetworkResult)
                 
                 Log.d(TAG, "Connected to WiFi: $ssid (clean: $cleanSsid, Home: $isHomeNetworkResult)")
                 
-                // Update URL based on network type
                 updateUrlForCurrentNetwork(isHomeNetworkResult)
             } else {
-                // We're on WiFi but couldn't detect SSID
                 _currentSsid.postValue("")
                 
-                // CRITICAL: For better UX, assume home network when on WiFi but can't detect SSID
                 _isHomeNetwork.postValue(true) 
                 Log.d(TAG, "WiFi connected but couldn't get SSID - defaulting to home network")
                 
-                // Update URL to internal since we're defaulting to home network
                 updateUrlForCurrentNetwork(true)
             }
         } else {
@@ -553,7 +367,6 @@ class NetworkUtils(private val context: Context) {
             _isHomeNetwork.postValue(false)
             Log.d(TAG, "Not connected to WiFi")
             
-            // Update URL to external since we're not on WiFi
             updateUrlForCurrentNetwork(false)
         }
     }
@@ -575,12 +388,10 @@ class NetworkUtils(private val context: Context) {
     }
     
     /**
-     * Main function to get the appropriate URL based on the current situation
-     * Considers connection mode, WiFi state, and home network status
+     * Gets the appropriate URL based on the current situation
      */
-    fun getAppropriateUrl(): String {
+    fun getUrl(): String {
         try {
-            // First check connection mode - this is the most reliable approach
             val connectionMode = prefs.getString("connection_mode", "auto") ?: "auto"
             
             if (connectionMode == "internal") {
@@ -591,18 +402,15 @@ class NetworkUtils(private val context: Context) {
                 return getExternalUrl()
             }
             
-            // If auto mode, first check if WiFi is connected at all
             if (!isWifiConnected()) {
                 Log.d(TAG, "Not connected to WiFi, using external URL")
                 return getExternalUrl()
             }
             
-            // Check if manual override is set
             val manualOverride = prefs.getString("manual_home_network", "")
             if (!manualOverride.isNullOrEmpty()) {
                 Log.d(TAG, "Using manual override: $manualOverride")
                 
-                // Check if override is in home networks
                 val homeNetworks = getHomeNetworks()
                 if (homeNetworks.any { it.equals(manualOverride, ignoreCase = true) }) {
                     Log.d(TAG, "Manual override matches home network, using internal URL")
@@ -610,33 +418,27 @@ class NetworkUtils(private val context: Context) {
                 }
             }
             
-            // Try to get actual SSID
-            val ssid = getSsidWithBestMethod()
+            val ssid = getSsid()
             Log.d(TAG, "Got SSID: $ssid")
             
             if (ssid == null || ssid.isEmpty() || ssid == "<unknown ssid>" || ssid == "Current WiFi") {
-                // CRITICAL FIX: If we can't get SSID but we are on WiFi, default to internal URL for better UX
                 Log.d(TAG, "Could not determine SSID - DEFAULTING TO INTERNAL URL for better UX")
                 return getInternalUrl()
             }
             
-            // Clean up SSID (Android sometimes adds quotes) for reliable matching
             val cleanSsid = ssid.trim().removeSurrounding("\"")
             Log.d(TAG, "Cleaned SSID: $cleanSsid")
             
-            // Check against home networks list
             val isInHomeList = isNetworkInHomeList(cleanSsid)
             if (isInHomeList) {
                 Log.d(TAG, "SSID matches home network, using internal URL")
                 return getInternalUrl()
             }
             
-            // No match found, use external URL
             Log.d(TAG, "SSID not in home networks, using external URL")
             return getExternalUrl()
         } catch (e: Exception) {
-            Log.e(TAG, "Error in getAppropriateUrl: ${e.message}")
-            // When in doubt, use internal URL for better UX
+            Log.e(TAG, "Error in getUrl: ${e.message}")
             return getInternalUrl() 
         }
     }
@@ -680,10 +482,8 @@ class NetworkUtils(private val context: Context) {
     
     /**
      * Determines if current WiFi network is a home network
-     * Considers connection mode, manual override, and SSID detection
      */
-    fun isHomeNetwork(): Boolean {
-        // First check connection mode
+    fun isHome(): Boolean {
         val connectionMode = prefs.getString("connection_mode", "auto") ?: "auto"
         
         if (connectionMode == "internal") {
@@ -692,32 +492,24 @@ class NetworkUtils(private val context: Context) {
             return false
         }
         
-        // Check if connected to WiFi at all
         if (!isWifiConnected()) {
             return false
         }
         
-        // Get current SSID
-        val ssid = getSsidWithBestMethod()
+        val ssid = getSsid()
         
-        // Handle detection failure cases
         if (ssid == null || ssid.isEmpty() || ssid == "<unknown ssid>" || ssid == "Current WiFi") {
-            // Check if manual override is set
             val manualOverride = prefs.getString("manual_home_network", "")
             if (!manualOverride.isNullOrEmpty()) {
-                // Check if override is in home networks
                 val homeNetworks = getHomeNetworks()
                 return homeNetworks.any { it.equals(manualOverride, ignoreCase = true) }
             }
             
-            // CRITICAL FIX: If we can't detect SSID but are on WiFi, assume home network for better UX
             return true
         }
         
-        // Clean up SSID (Android sometimes adds quotes) for reliable matching
         val cleanSsid = ssid.trim().removeSurrounding("\"")
         
-        // Check against home networks
         return isNetworkInHomeList(cleanSsid)
     }
     
@@ -744,21 +536,19 @@ class NetworkUtils(private val context: Context) {
     
     /**
      * Gets SSID using the most reliable method for the device
-     * Updated for Android 16 compatibility
      */
-    fun getSsidWithBestMethod(): String? {
+    fun getSsid(): String? {
         try {
-            // First check if WiFi is even connected
             if (!isWifiConnected()) {
                 Log.d(TAG, "Not connected to WiFi")
                 return null
             }
             
-            // Before trying any method, check permissions for Android 16+
-            val hasNearbyDevicesPermission = ContextCompat.checkSelfPermission(
-                context, 
-                Manifest.permission.NEARBY_WIFI_DEVICES
-            ) == PackageManager.PERMISSION_GRANTED
+            val hasNearbyDevicesPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES) == PackageManager.PERMISSION_GRANTED
+            } else {
+                false
+            }
             
             val hasLocationPermission = ContextCompat.checkSelfPermission(
                 context, 
@@ -767,95 +557,28 @@ class NetworkUtils(private val context: Context) {
             
             Log.d(TAG, "Permissions - NEARBY_WIFI_DEVICES: $hasNearbyDevicesPermission, LOCATION: $hasLocationPermission")
             
-            // METHOD 1: Modern API approach for Android 12+ and Android 16+ 
-            // This is the recommended approach for newer Android versions
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                try {
-                    // For Android 16+, we need NEARBY_WIFI_DEVICES permission
-                    // For older versions, location permission might be sufficient
-                    if (hasNearbyDevicesPermission || hasLocationPermission) {
-                        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-                        val activeNetwork = cm.activeNetwork ?: return null
-                        val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return null
-                        
-                        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
-                            val transportInfo = capabilities.transportInfo
-                            if (transportInfo is WifiInfo) {
-                                var ssid = transportInfo.ssid
-                                
-                                // Clean up SSID
-                                if (ssid != null && ssid.startsWith("\"") && ssid.endsWith("\"")) {
-                                    ssid = ssid.substring(1, ssid.length - 1)
-                                }
-                                
-                                Log.d(TAG, "Got SSID from transportInfo: $ssid")
-                                
-                                if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
-                                    return ssid
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error with NetworkCapabilities approach: ${e.message}")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && (hasNearbyDevicesPermission || hasLocationPermission)) {
+                val ssid = getSsidFromTransportInfo()
+                if (ssid != null) {
+                    Log.d(TAG, "Got SSID from transportInfo: $ssid")
+                    return ssid
                 }
             }
             
-            // METHOD 2: Direct WifiManager approach (works on many devices when proper permissions are granted)
-            try {
-                // Check if we have either NEARBY_WIFI_DEVICES or location permission
-                if (hasNearbyDevicesPermission || hasLocationPermission) {
-                    val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                    @Suppress("DEPRECATION")
-                    val wifiInfo = wifiManager.connectionInfo
-                    
-                    if (wifiInfo != null && wifiInfo.networkId != -1) {
-                        @Suppress("DEPRECATION")
-                        var ssid = wifiInfo.ssid
-                        
-                        // Clean up SSID
-                        if (ssid != null && ssid.startsWith("\"") && ssid.endsWith("\"")) {
-                            ssid = ssid.substring(1, ssid.length - 1)
-                        }
-                        
-                        Log.d(TAG, "WifiManager direct SSID: $ssid")
-                        
-                        if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
-                            return ssid
-                        }
-                    }
+            if (hasNearbyDevicesPermission || hasLocationPermission) {
+                val ssid = getSsidFromWifiManager()
+                if (ssid != null) {
+                    Log.d(TAG, "Got SSID from WifiManager: $ssid")
+                    return ssid
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error with direct WifiManager approach: ${e.message}")
             }
             
-            // METHOD 3: Try to get SSID from system settings as backup
-            try {
-                val settingsSSID = Settings.System.getString(context.contentResolver, "wifi_ap_ssid")
-                Log.d(TAG, "SSID from settings: $settingsSSID")
-                
-                if (!settingsSSID.isNullOrEmpty() && settingsSSID != "<unknown ssid>") {
-                    val cleanSsid = settingsSSID.removeSurrounding("\"")
-                    if (cleanSsid.isNotEmpty()) {
-                        return cleanSsid
-                    }
-                }
-                
-                // Try Secure settings as well
-                val secureSSID = Settings.Secure.getString(context.contentResolver, "wifi_ssid")
-                Log.d(TAG, "SSID from secure settings: $secureSSID")
-                
-                if (!secureSSID.isNullOrEmpty() && secureSSID != "<unknown ssid>") {
-                    val cleanSsid = secureSSID.removeSurrounding("\"")
-                    if (cleanSsid.isNotEmpty()) {
-                        return cleanSsid
-                    }
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Error getting SSID from settings: ${e.message}")
+            val settingsSsid = getSsidFromSettings()
+            if (settingsSsid != null) {
+                Log.d(TAG, "Got SSID from settings: $settingsSsid")
+                return settingsSsid
             }
             
-            // METHOD 4: Check for manual override as last resort
             val manualOverride = prefs.getString("manual_home_network", "")
             if (!manualOverride.isNullOrEmpty()) {
                 Log.d(TAG, "Using manual home network override: $manualOverride")
@@ -866,6 +589,86 @@ class NetworkUtils(private val context: Context) {
             return null
         } catch (e: Exception) {
             Log.e(TAG, "Error getting SSID: ${e.message}")
+            return null
+        }
+    }
+    
+    /**
+     * Get SSID from TransportInfo (Android 12+)
+     */
+    private fun getSsidFromTransportInfo(): String? {
+        try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val activeNetwork = cm.activeNetwork ?: return null
+            val capabilities = cm.getNetworkCapabilities(activeNetwork) ?: return null
+            
+            if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                val transportInfo = capabilities.transportInfo
+                if (transportInfo is WifiInfo) {
+                    @Suppress("DEPRECATION")
+                    var ssid = transportInfo.ssid
+                    
+                    if (ssid != null && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+                        ssid = ssid.substring(1, ssid.length - 1)
+                    }
+                    
+                    if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
+                        return ssid
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error with TransportInfo approach: ${e.message}")
+        }
+        return null
+    }
+    
+    /**
+     * Get SSID from WifiManager directly
+     */
+    private fun getSsidFromWifiManager(): String? {
+        try {
+            val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            @Suppress("DEPRECATION")
+            val wifiInfo = wifiManager.connectionInfo
+            
+            if (wifiInfo != null && wifiInfo.networkId != -1) {
+                @Suppress("DEPRECATION")
+                var ssid = wifiInfo.ssid
+                
+                if (ssid != null && ssid.startsWith("\"") && ssid.endsWith("\"")) {
+                    ssid = ssid.substring(1, ssid.length - 1)
+                }
+                
+                if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
+                    return ssid
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error with WifiManager approach: ${e.message}")
+        }
+        return null
+    }
+    
+    /**
+     * Get SSID from system settings
+     */
+    private fun getSsidFromSettings(): String? {
+        try {
+            val settingValue = Settings.System.getString(context.contentResolver, "wifi_ap_ssid")
+            val settingValue2 = Settings.Secure.getString(context.contentResolver, "wifi_ssid")
+            
+            if (!settingValue.isNullOrEmpty() && settingValue != "<unknown ssid>") {
+                return settingValue.removeSurrounding("\"")
+            }
+            
+            if (!settingValue2.isNullOrEmpty() && settingValue2 != "<unknown ssid>") {
+                return settingValue2.removeSurrounding("\"")
+            }
+            
+            return null
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting SSID from settings: ${e.message}")
             return null
         }
     }

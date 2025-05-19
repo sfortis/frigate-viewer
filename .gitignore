@@ -31,4 +31,3 @@ gradle.properties
 
 # Project-specific files
 CLAUDE.md
-.claude/
