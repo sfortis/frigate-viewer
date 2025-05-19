@@ -9,6 +9,9 @@ A network-aware Android client for Frigate NVR that automatically switches betwe
 - **Full WebView support**: JavaScript, zoom, and navigation
 - **Keep screen on**: Prevents screen timeout while viewing cameras
 
+
+![App Screenshot](Screenshot_Frigate Viewer_main.png)
+
 ## Quick Start
 
 1. Install and open the app
