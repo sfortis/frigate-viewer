@@ -30,6 +30,7 @@ A seamless Android client for Frigate NVR that intelligently switches between lo
 ## Security & Privacy
 
 - **Zero Storage**: No video or images stored on your device
+- **Isolation**: Keeping tokens, cookies, etc., in the app's private DOM storage rather than the device's web browser.
 - **Viewer Only**: All processing remains on your Frigate server
 - **Direct Connection**: No cloud services or intermediaries
 - **No Telemetry**: No analytics or usage tracking
