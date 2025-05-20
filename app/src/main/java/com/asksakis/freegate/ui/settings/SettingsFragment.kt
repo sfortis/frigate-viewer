@@ -34,6 +34,7 @@ import androidx.preference.PreferenceManager
 import androidx.preference.SwitchPreferenceCompat
 import androidx.lifecycle.LifecycleOwner
 import com.asksakis.freegate.R
+import androidx.navigation.fragment.findNavController
 import com.asksakis.freegate.utils.NetworkUtils
 import com.asksakis.freegate.utils.WifiNetworkManager
 // NetworkFixer has been consolidated into NetworkUtils
@@ -116,6 +117,11 @@ class SettingsFragment : PreferenceFragmentCompat() {
             // Update the status display
             updateWifiStatus()
             
+            // Force refresh the network status to update the URL when user returns to home
+            networkUtils.forceRefresh()
+            
+            // Don't navigate immediately - let user naturally exit settings when ready
+            
             true
         }
     }
@@ -124,7 +130,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
      * Set up the manual home network preference
      */
     private fun setupManualHomeNetworkPreference() {
-        val manualHomeNetworkPref = findPreference<androidx.preference.EditTextPreference>("manual_home_network")
+        val manualHomeNetworkPref = findPreference<EditTextPreference>("manual_home_network")
         
         // Get current WiFi status using modern API
         val cm = requireContext().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -155,9 +161,9 @@ class SettingsFragment : PreferenceFragmentCompat() {
             val wifiManager = requireContext().applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
             @Suppress("DEPRECATION")
             suggestedSsid = wifiManager.connectionInfo?.ssid?.removeSurrounding("\"")
-            android.util.Log.d("SettingsFragment", "Direct SSID from WifiManager: $suggestedSsid")
+            Log.d("SettingsFragment", "Direct SSID from WifiManager: $suggestedSsid")
         } catch (e: Exception) {
-            android.util.Log.e("SettingsFragment", "Error getting direct SSID: ${e.message}")
+            Log.e("SettingsFragment", "Error getting direct SSID: ${e.message}")
         }
         
         // Method 2: Try via active network capabilities
@@ -166,10 +172,10 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 if (capabilities != null) {
                     val wifiInfo = capabilities.transportInfo as? WifiInfo
                     suggestedSsid = wifiInfo?.ssid?.removeSurrounding("\"")
-                    android.util.Log.d("SettingsFragment", "SSID from capabilities: $suggestedSsid")
+                    Log.d("SettingsFragment", "SSID from capabilities: $suggestedSsid")
                 }
             } catch (e: Exception) {
-                android.util.Log.e("SettingsFragment", "Error getting SSID from capabilities: ${e.message}")
+                Log.e("SettingsFragment", "Error getting SSID from capabilities: ${e.message}")
             }
         }
         
@@ -177,7 +183,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         if (suggestedSsid == null || suggestedSsid == "<unknown ssid>") {
             val utils = NetworkUtils.getInstance(requireContext())
             suggestedSsid = utils.getSsid()
-            android.util.Log.d("SettingsFragment", "SSID from NetworkUtils: $suggestedSsid")
+            Log.d("SettingsFragment", "SSID from NetworkUtils: $suggestedSsid")
         }
         
         // Set up dialog message based on what we found
@@ -320,7 +326,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
             }
         } catch (e: Exception) {
             wifiStatusPref.summary = "Error checking network status\nUsing: Internal URL\n\nTry setting Connection Mode to 'Internal'"
-            android.util.Log.e("SettingsFragment", "Error updating WiFi status: ${e.message}")
+            Log.e("SettingsFragment", "Error updating WiFi status: ${e.message}")
         }
     }
     
@@ -331,7 +337,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         try {
             // Use networkUtils' simplified detection for best results
             val ssid = networkUtils.getSsid()
-            android.util.Log.d("SettingsFragment", "NetworkUtils SSID: $ssid")
+            Log.d("SettingsFragment", "NetworkUtils SSID: $ssid")
             
             if (ssid != null && ssid.isNotEmpty() && ssid != "<unknown ssid>") {
                 return ssid
@@ -341,13 +347,13 @@ class SettingsFragment : PreferenceFragmentCompat() {
             val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
             val manualOverride = prefs.getString("manual_home_network", "")
             if (!manualOverride.isNullOrEmpty()) {
-                android.util.Log.d("SettingsFragment", "Using manual override: $manualOverride")
+                Log.d("SettingsFragment", "Using manual override: $manualOverride")
                 return manualOverride
             }
             
             // Check if we're even connected to WiFi
             if (networkUtils.isWifiConnected()) {
-                android.util.Log.d("SettingsFragment", "Connected to WiFi but couldn't get SSID")
+                Log.d("SettingsFragment", "Connected to WiFi but couldn't get SSID")
                 // When connected to WiFi but detection fails, return a placeholder
                 // But not 'Current WiFi' as that causes issues with URL selection
                 return "Unknown WiFi" 
@@ -355,7 +361,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
             
             return null
         } catch (e: Exception) {
-            android.util.Log.e("SettingsFragment", "Error getting WiFi SSID: ${e.message}")
+            Log.e("SettingsFragment", "Error getting WiFi SSID: ${e.message}")
             return null
         }
     }
@@ -648,6 +654,8 @@ class SettingsFragment : PreferenceFragmentCompat() {
         dialog.setButton(DialogInterface.BUTTON_NEGATIVE, "Done") { _, _ ->
             dialog.dismiss()
             updateWifiStatus()
+            
+            // Don't navigate back to home - let user choose when to leave settings
         }
         
         // Show dialog
@@ -687,7 +695,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
             return
         }
         
-        android.util.Log.d("SettingsFragment", "Adding network to home networks: '$cleanSsid'")
+        Log.d("SettingsFragment", "Adding network to home networks: '$cleanSsid'")
         
         // Get existing networks
         val networks = getHomeNetworks().toMutableSet()
@@ -707,7 +715,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
         saveHomeNetworks(networks)
         
         // Log for debugging
-        android.util.Log.d("SettingsFragment", "Updated home networks: ${networks.joinToString()}")
+        Log.d("SettingsFragment", "Updated home networks: ${networks.joinToString()}")
         
         // Show success message
         Toast.makeText(
@@ -728,6 +736,9 @@ class SettingsFragment : PreferenceFragmentCompat() {
     private fun saveHomeNetworks(networks: Set<String>) {
         val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
         prefs.edit().putStringSet("home_wifi_networks", networks).apply()
+        
+        // Force refresh the network status after changing home networks list
+        networkUtils.forceRefresh()
     }
     
     /**
@@ -798,6 +809,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
 
     /**
      * Disables autocorrect and autofill for all EditTextPreferences
+     * Also sets up listeners to trigger URL refresh when settings change
      */
     private fun disableAutocorrectForAllInputs() {
         try {
@@ -812,6 +824,26 @@ class SettingsFragment : PreferenceFragmentCompat() {
             
             // Configure URL preferences
             for (pref in urlPrefs) {
+                // Set the OnPreferenceChangeListener to update the URL but not navigate away
+                pref.setOnPreferenceChangeListener { _, newValue ->
+                    // Get the preference key to identify which URL changed
+                    val prefKey = pref.key
+                    val urlType = if (prefKey == "internal_url") "Internal" else "External"
+                    
+                    // Show a toast message
+                    Toast.makeText(
+                        requireContext(),
+                        "$urlType URL updated to: $newValue",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    
+                    // Force refresh network status to load the new URL when user returns to home
+                    networkUtils.forceRefresh()
+                    
+                    // Don't navigate immediately - let user naturally exit settings when ready
+                    true
+                }
+                
                 pref.setOnBindEditTextListener { editText ->
                     // Set proper input type for URLs with no suggestions
                     editText.inputType = InputType.TYPE_TEXT_VARIATION_URI or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -846,22 +878,7 @@ class SettingsFragment : PreferenceFragmentCompat() {
      * Set up observers for network state changes to update status automatically
      */
     private fun setupNetworkObservers() {
-        // Observe SSID changes
-        networkUtils.currentSsid.observe(this as LifecycleOwner) { ssid ->
-            updateWifiStatus()
-        }
-        
-        // Observe connection state changes
-        networkUtils.isConnected.observe(this as LifecycleOwner) { isConnected ->
-            updateWifiStatus()
-        }
-        
-        // Observe home network state changes
-        networkUtils.isHomeNetwork.observe(this as LifecycleOwner) { isHome ->
-            updateWifiStatus()
-        }
-        
-        // Observe URL changes (as a result of network changes)
+        // Just observe the URL changes which will happen whenever the network changes
         networkUtils.currentUrl.observe(this as LifecycleOwner) { url ->
             updateWifiStatus()
         }
@@ -904,10 +921,10 @@ class SettingsFragment : PreferenceFragmentCompat() {
         
         // Check if we have required permissions
         val hasRequired = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requireContext().checkSelfPermission(android.Manifest.permission.NEARBY_WIFI_DEVICES) == 
+            requireContext().checkSelfPermission(Manifest.permission.NEARBY_WIFI_DEVICES) ==
                 PackageManager.PERMISSION_GRANTED
         } else {
-            requireContext().checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == 
+            requireContext().checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
                 PackageManager.PERMISSION_GRANTED
         }
         
@@ -935,5 +952,14 @@ class SettingsFragment : PreferenceFragmentCompat() {
         
         // Update WiFi status on resume
         updateWifiStatus()
+    }
+    
+    override fun onStop() {
+        super.onStop()
+        
+        // Force refresh network status when leaving settings
+        // This ensures URLs are updated when returning to the home fragment
+        networkUtils.forceRefresh()
+        Log.d("SettingsFragment", "Leaving settings - refreshing network status")
     }
 }

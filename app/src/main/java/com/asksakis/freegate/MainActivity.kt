@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
     ) { isGranted ->
         if (isGranted) {
             // Permission granted, refresh network status
-            networkUtils.checkStatus()
+            networkUtils.checkAndUpdateUrl()
             
             // Refresh the current fragment if it's the home fragment
             if (::navController.isInitialized && 
@@ -83,6 +83,20 @@ class MainActivity : AppCompatActivity() {
         val keepScreenOn = prefs.getBoolean("keep_screen_on", false)
         if (keepScreenOn) {
             window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        
+        // Check if this is the first run
+        val isFirstRun = prefs.getBoolean("is_first_run", true)
+        if (isFirstRun) {
+            // Show a toast prompting the user to configure URLs
+            Toast.makeText(
+                this,
+                "Welcome to Frigate Viewer! Please configure your Frigate URLs in Settings.",
+                Toast.LENGTH_LONG
+            ).show()
+            
+            // Save that we've shown the first-run message
+            prefs.edit().putBoolean("is_first_run", false).apply()
         }
         
         // Initialize network utilities (singleton)
@@ -122,7 +136,7 @@ class MainActivity : AppCompatActivity() {
         val navView: NavigationView = binding.navView
         
         // With FragmentContainerView, we need to wait for the fragment to be attached
-        val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as? androidx.navigation.fragment.NavHostFragment
+        val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as? NavHostFragment
         if (navHostFragment != null) {
             navController = navHostFragment.navController
             
@@ -141,10 +155,7 @@ class MainActivity : AppCompatActivity() {
                 updateNetworkIndicator(destination)
             }
             
-            // Observe network state changes
-            networkUtils.isHomeNetwork.observe(this) { _ ->
-                updateNetworkIndicator(navController.currentDestination)
-            }
+            // Observe URL changes
             networkUtils.currentUrl.observe(this) { _ ->
                 updateNetworkIndicator(navController.currentDestination)
             }
@@ -173,7 +184,7 @@ class MainActivity : AppCompatActivity() {
      */
     private fun requestRequiredPermissions() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { // Android 13+
-            android.util.Log.d("MainActivity", "Requesting NEARBY_WIFI_DEVICES permission for Android 13+/16+")
+            Log.d("MainActivity", "Requesting NEARBY_WIFI_DEVICES permission for Android 13+/16+")
             
             // Request all needed permissions for Android 13+ and 16+
             val permissionsToRequest = arrayOf(
@@ -183,14 +194,17 @@ class MainActivity : AppCompatActivity() {
                 Manifest.permission.ACCESS_NETWORK_STATE,
                 // Also request location permissions as they might still be needed on some devices
                 Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                // Audio permissions for WebRTC
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.MODIFY_AUDIO_SETTINGS
             )
             
             // Check each permission individually
             permissionsToRequest.forEach { permission ->
                 val hasPermission = ContextCompat.checkSelfPermission(this, permission) == 
                     PackageManager.PERMISSION_GRANTED
-                android.util.Log.d("MainActivity", "Permission $permission granted: $hasPermission")
+                Log.d("MainActivity", "Permission $permission granted: $hasPermission")
             }
             
             // Request all permissions directly
@@ -204,7 +218,7 @@ class MainActivity : AppCompatActivity() {
             // Removed the toast message as requested
         } else {
             // For older versions, we need location permission
-            android.util.Log.d("MainActivity", "Requesting ACCESS_FINE_LOCATION permission for Android <13")
+            Log.d("MainActivity", "Requesting ACCESS_FINE_LOCATION permission for Android <13")
             
             // Request both location permissions
             ActivityCompat.requestPermissions(
@@ -213,7 +227,9 @@ class MainActivity : AppCompatActivity() {
                     Manifest.permission.ACCESS_FINE_LOCATION,
                     Manifest.permission.ACCESS_COARSE_LOCATION,
                     Manifest.permission.ACCESS_WIFI_STATE,
-                    Manifest.permission.ACCESS_NETWORK_STATE
+                    Manifest.permission.ACCESS_NETWORK_STATE,
+                    Manifest.permission.RECORD_AUDIO,
+                    Manifest.permission.MODIFY_AUDIO_SETTINGS
                 ),
                 101
             )
@@ -319,11 +335,11 @@ class MainActivity : AppCompatActivity() {
      * This helps with debugging permission issues
      */
     private fun logPermissionStatus() {
-        android.util.Log.d("MainActivity", "===== PERMISSION STATUS =====")
+        Log.d("MainActivity", "===== PERMISSION STATUS =====")
         
         // Log basic info
-        android.util.Log.d("MainActivity", "Android SDK Version: ${Build.VERSION.SDK_INT}")
-        android.util.Log.d("MainActivity", "Android VERSION.RELEASE: ${Build.VERSION.RELEASE}")
+        Log.d("MainActivity", "Android SDK Version: ${Build.VERSION.SDK_INT}")
+        Log.d("MainActivity", "Android VERSION.RELEASE: ${Build.VERSION.RELEASE}")
         
         // Check all potentially relevant permissions
         val permissions = arrayOf(
@@ -332,44 +348,46 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.ACCESS_COARSE_LOCATION,
             Manifest.permission.ACCESS_WIFI_STATE,
             Manifest.permission.ACCESS_NETWORK_STATE,
-            Manifest.permission.CHANGE_WIFI_STATE
+            Manifest.permission.CHANGE_WIFI_STATE,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.MODIFY_AUDIO_SETTINGS
         )
         
         permissions.forEach { permission ->
             val hasPermission = ContextCompat.checkSelfPermission(this, permission) == 
                 PackageManager.PERMISSION_GRANTED
-            android.util.Log.d("MainActivity", "Permission $permission: ${if (hasPermission) "GRANTED" else "DENIED"}")
+            Log.d("MainActivity", "Permission $permission: ${if (hasPermission) "GRANTED" else "DENIED"}")
         }
         
         // Check and log WiFi status
         val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        android.util.Log.d("MainActivity", "WiFi Enabled: ${wifiManager.isWifiEnabled}")
+        Log.d("MainActivity", "WiFi Enabled: ${wifiManager.isWifiEnabled}")
         
         // Try to get the SSID in multiple ways for debugging
         try {
             @Suppress("DEPRECATION")
             val wifiInfoSsid = wifiManager.connectionInfo?.ssid
-            android.util.Log.d("MainActivity", "Debug - WiFi SSID direct from WifiManager: $wifiInfoSsid")
+            Log.d("MainActivity", "Debug - WiFi SSID direct from WifiManager: $wifiInfoSsid")
             
             val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val activeNetwork = connectivityManager.activeNetwork
             val networkCapabilities = connectivityManager.getNetworkCapabilities(activeNetwork)
-            android.util.Log.d("MainActivity", "Debug - Has WiFi transport: ${networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true}")
+            Log.d("MainActivity", "Debug - Has WiFi transport: ${networkCapabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true}")
             
             val transportInfo = networkCapabilities?.transportInfo
-            android.util.Log.d("MainActivity", "Debug - TransportInfo is not null: ${transportInfo != null}")
+            Log.d("MainActivity", "Debug - TransportInfo is not null: ${transportInfo != null}")
             
             if (transportInfo != null && transportInfo is android.net.wifi.WifiInfo) {
                 @Suppress("DEPRECATION")
                 val transportSsid = transportInfo.ssid
-                android.util.Log.d("MainActivity", "Debug - WiFi SSID from TransportInfo: $transportSsid")
+                Log.d("MainActivity", "Debug - WiFi SSID from TransportInfo: $transportSsid")
             }
             
             // Try with direct settings access
             val systemSsid = android.provider.Settings.System.getString(contentResolver, "wifi_ssid")
-            android.util.Log.d("MainActivity", "Debug - SSID from System settings: $systemSsid")
+            Log.d("MainActivity", "Debug - SSID from System settings: $systemSsid")
         } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Error in SSID debug: ${e.message}")
+            Log.e("MainActivity", "Error in SSID debug: ${e.message}")
         }
         
         // Check main permission requirement
@@ -381,8 +399,8 @@ class MainActivity : AppCompatActivity() {
         val hasMainPermission = ContextCompat.checkSelfPermission(this, mainPermission) == 
             PackageManager.PERMISSION_GRANTED
             
-        android.util.Log.d("MainActivity", "Main required permission ($mainPermission): ${if (hasMainPermission) "GRANTED" else "DENIED"}")
-        android.util.Log.d("MainActivity", "===== END PERMISSION STATUS =====")
+        Log.d("MainActivity", "Main required permission ($mainPermission): ${if (hasMainPermission) "GRANTED" else "DENIED"}")
+        Log.d("MainActivity", "===== END PERMISSION STATUS =====")
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -469,6 +487,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
+    override fun onDestroy() {
+        // Unregister network callbacks to prevent memory leaks
+        if (::networkUtils.isInitialized) {
+            networkUtils.unregisterCallback()
+        }
+        
+        super.onDestroy()
+    }
+    
     // Override to improve navigation consistency
     override fun onSupportNavigateUp(): Boolean {
         if (!::navController.isInitialized) {
@@ -492,7 +519,7 @@ class MainActivity : AppCompatActivity() {
         
         // If NavController wasn't initialized in onCreate, try again
         if (!::navController.isInitialized) {
-            val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as? androidx.navigation.fragment.NavHostFragment
+            val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as? NavHostFragment
             if (navHostFragment != null) {
                 navController = navHostFragment.navController
                 
@@ -512,10 +539,7 @@ class MainActivity : AppCompatActivity() {
                     updateNetworkIndicator(destination)
                 }
                 
-                // Observe network state changes
-                networkUtils.isHomeNetwork.observe(this) { _ ->
-                    updateNetworkIndicator(navController.currentDestination)
-                }
+                // Observe URL changes only
                 networkUtils.currentUrl.observe(this) { _ ->
                     updateNetworkIndicator(navController.currentDestination)
                 }

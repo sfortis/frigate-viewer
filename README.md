@@ -1,32 +1,39 @@
 # Frigate Viewer
 
-A network-aware Android client for Frigate NVR that automatically switches between internal and external URLs based on your WiFi connection.
+A seamless Android client for Frigate NVR that intelligently switches between local and remote URLs based on your network connection.
 
 ## Features
 
-- **Automatic URL switching**: Uses internal URL on home WiFi, external URL elsewhere
-- **Manual override**: Force internal or external URL when needed
-- **Full WebView support**: JavaScript, zoom, and navigation
-- **Keep screen on**: Prevents screen timeout while viewing cameras
-
-## Quick Start
-
-1. Install and open the app
-2. Grant WiFi detection permissions
-3. In Settings, configure:
-   - Internal URL (e.g., `http://192.168.1.100:5000`)
-   - External URL (e.g., `https://example.com/frigate`)
-   - Add your home WiFi networks
-4. The app automatically loads the correct URL based on your connection
-
-## Requirements
-
-- Android 12+ (API 31)
-- Frigate NVR accessible locally and/or remotely
+- **Network-Aware Switching**: Automatic URL selection based on WiFi network
+- **Custom Network Lists**: Define which WiFi networks use your local URL
+- **Flexible Connection Modes**: Auto, Internal-only, or External-only options
+- **Optimized Video Playback**: Hardware-accelerated WebView with WebRTC support
+- **Reliability Enhancements**: Automatic recovery from crashes and network changes
+- **URL Validation**: Connectivity verification before switching connections
+- **Internal SSL Support**: Self-signed certificates accepted for internal URLs only
 
 ## Permissions
 
-- Internet and network state access
-- WiFi detection (location permission on older Android versions)
+- **Required**: Internet access, Network state monitoring
+- **Network Detection**: 
+  - Android 13+: NEARBY_WIFI_DEVICES
+  - Earlier versions: ACCESS_FINE_LOCATION
+- **Optional**: Camera and microphone (for WebRTC features)
 
-Built with Kotlin and Material Design.
+## Requirements
+
+- Android 13+ recommended
+- Frigate NVR with both local and remote access configured
+
+## Security & Privacy
+
+- **Zero Storage**: No video or images stored on your device
+- **Viewer Only**: All processing remains on your Frigate server
+- **Direct Connection**: No cloud services or intermediaries
+- **No Telemetry**: No analytics or usage tracking
+- **Secure Access**: Authentication handled by your Frigate instance
+- **Certificate Handling**: Self-signed certificates accepted for internal connections only, standard certificates required for external URLs
+
+## License
+
+MIT License

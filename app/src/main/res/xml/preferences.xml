@@ -18,14 +18,14 @@
             app:iconSpaceReserved="false" />
 
         <EditTextPreference
+            android:defaultValue="https://demo.frigate.video/"
+            android:importantForAutofill="no"
+            android:inputType="textUri|textNoSuggestions"
             android:key="external_url"
             android:selectAllOnFocus="true"
             android:singleLine="true"
-            android:title="External URL"
             android:summary="URL when not on home network"
-            android:defaultValue="https://example.com/frigate"
-            android:inputType="textUri|textNoSuggestions"
-            android:importantForAutofill="no"
+            android:title="External URL"
             app:iconSpaceReserved="false" />
     </PreferenceCategory>
     
