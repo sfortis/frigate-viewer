@@ -2,6 +2,8 @@
 
 A seamless Android client for Frigate NVR that intelligently switches between local and remote URLs based on your network connection.
 
+**This app is not part of the official Frigate NVR software.**
+
 ![Frigate Viewer Screenshot 1](assets/images/screenshot1.png)  ![Frigate Viewer Screenshot 2](assets/images/screenshot2.png)
 
 ## Features
