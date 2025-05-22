@@ -16,6 +16,11 @@ import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import android.webkit.ConsoleMessage
 import android.webkit.PermissionRequest
 import android.webkit.ValueCallback
@@ -47,6 +52,10 @@ class HomeFragment : Fragment() {
     private var fileUploadCallback: ValueCallback<Array<Uri>>? = null
     private var currentLoadedUrl: String? = null
     private var urlLoadInProgress = false
+    
+    private var customView: View? = null
+    private var customViewCallback: WebChromeClient.CustomViewCallback? = null
+    private var wasSystemBarsVisible: Boolean = true
     
     companion object {
         private const val TAG = "HomeFragment"
@@ -666,6 +675,50 @@ class HomeFragment : Fragment() {
                         request?.deny()
                     }
                 }
+                
+                override fun onShowCustomView(view: View?, callback: WebChromeClient.CustomViewCallback?) {
+                    Log.d(TAG, "Entering fullscreen mode")
+                    
+                    if (customView != null) {
+                        onHideCustomView()
+                        return
+                    }
+                    
+                    customView = view
+                    customViewCallback = callback
+                    
+                    // Hide system UI for immersive fullscreen using modern API
+                    hideSystemBars()
+                    
+                    // Hide normal content and show fullscreen container
+                    binding.swipeRefresh.visibility = View.GONE
+                    binding.loadingProgress.visibility = View.GONE
+                    binding.fullscreenContainer.visibility = View.VISIBLE
+                    
+                    // Add custom view to fullscreen container
+                    binding.fullscreenContainer.addView(view)
+                }
+                
+                override fun onHideCustomView() {
+                    Log.d(TAG, "Exiting fullscreen mode")
+                    
+                    if (customView == null) return
+                    
+                    // Remove custom view from container
+                    binding.fullscreenContainer.removeView(customView)
+                    customView = null
+                    
+                    // Hide fullscreen container and show normal content
+                    binding.fullscreenContainer.visibility = View.GONE
+                    binding.swipeRefresh.visibility = View.VISIBLE
+                    
+                    // Restore system UI visibility using modern API
+                    showSystemBars()
+                    
+                    // Notify callback that we're done
+                    customViewCallback?.onCustomViewHidden()
+                    customViewCallback = null
+                }
             }
             
             // Configure WebView settings
@@ -811,6 +864,17 @@ class HomeFragment : Fragment() {
     }
     
     override fun onDestroyView() {
+        // Clean up fullscreen mode if active
+        if (customView != null) {
+            Log.d(TAG, "Cleaning up fullscreen mode during destroy")
+            binding.fullscreenContainer.removeView(customView)
+            customView = null
+            customViewCallback?.onCustomViewHidden()
+            customViewCallback = null
+            // Restore system UI visibility using modern API
+            showSystemBars()
+        }
+        
         // Handle file upload callback first
         fileUploadCallback?.onReceiveValue(null)
         fileUploadCallback = null
@@ -964,6 +1028,13 @@ class HomeFragment : Fragment() {
     private fun setupBackButtonHandler() {
         val callback = object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                // First check if we're in fullscreen mode
+                if (customView != null) {
+                    Log.d(TAG, "Back pressed in fullscreen mode - exiting fullscreen")
+                    binding.webView.webChromeClient?.onHideCustomView()
+                    return
+                }
+                
                 // Always check binding before accessing WebView
                 _binding?.let { safeBinding ->
                     if (safeBinding.webView.canGoBack()) {
@@ -1086,5 +1157,53 @@ class HomeFragment : Fragment() {
         
         // Only clear cache, avoid more aggressive cleanup
         _binding?.webView?.clearCache(true)
+    }
+    
+    /**
+     * Hide system bars for fullscreen immersive experience
+     */
+    private fun hideSystemBars() {
+        activity?.window?.let { window ->
+            wasSystemBarsVisible = true // Store that bars were visible
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // Modern API for Android 11+ (API 30+)
+                WindowCompat.setDecorFitsSystemWindows(window, false)
+                window.insetsController?.apply {
+                    hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                    systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                }
+            } else {
+                // Fallback to deprecated API for older versions
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = (
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    or View.SYSTEM_UI_FLAG_FULLSCREEN
+                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                )
+            }
+        }
+    }
+    
+    /**
+     * Show system bars when exiting fullscreen
+     */
+    private fun showSystemBars() {
+        activity?.window?.let { window ->
+            if (!wasSystemBarsVisible) return // Don't restore if they weren't visible
+            
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                // Modern API for Android 11+ (API 30+)
+                WindowCompat.setDecorFitsSystemWindows(window, true)
+                window.insetsController?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+            } else {
+                // Fallback to deprecated API for older versions
+                @Suppress("DEPRECATION")
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+            }
+        }
     }
 }

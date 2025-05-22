@@ -1,7 +1,6 @@
 package com.asksakis.freegate.utils
 
 import android.content.Context
-import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.util.Log
 import androidx.lifecycle.LiveData
@@ -10,10 +9,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeout
-import kotlin.coroutines.resume
 
 /**
  * Utility class for WiFi network selection UI.

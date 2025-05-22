@@ -14,28 +14,28 @@
         <androidx.appcompat.widget.Toolbar
             android:id="@+id/toolbar"
             android:layout_width="match_parent"
-            android:layout_height="?attr/actionBarSize"
-            android:background="?attr/colorPrimary"
+            android:layout_height="46dp"
+            android:background="#434343"
             app:popupTheme="@style/Theme.Freegate.PopupOverlay">
-            
+
             <!-- Network status indicator -->
             <TextView
                 android:id="@+id/network_indicator"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="INT"
-                android:textColor="#FFFFFF"
-                android:textStyle="bold"
-                android:textSize="14sp"
-                android:paddingStart="8dp"
-                android:paddingEnd="8dp"
-                android:paddingTop="4dp"
-                android:paddingBottom="4dp"
                 android:layout_gravity="end"
                 android:layout_marginEnd="16dp"
                 android:background="@drawable/network_indicator_background"
+                android:paddingStart="8dp"
+                android:paddingTop="4dp"
+                android:paddingEnd="8dp"
+                android:paddingBottom="4dp"
+                android:text="INT"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold"
                 android:visibility="visible" />
-                
+
         </androidx.appcompat.widget.Toolbar>
 
     </com.google.android.material.appbar.AppBarLayout>

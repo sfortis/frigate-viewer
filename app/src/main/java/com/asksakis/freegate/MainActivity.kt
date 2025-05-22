@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity() {
             // Show a toast prompting the user to configure URLs
             Toast.makeText(
                 this,
-                "Welcome to Frigate Viewer! Please configure your Frigate URLs in Settings.",
+                "Welcome! Configure Frigate URLs in Settings.",
                 Toast.LENGTH_LONG
             ).show()
             
