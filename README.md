@@ -10,8 +10,7 @@ A seamless Android client for Frigate NVR that intelligently switches between lo
 - **Custom Network Lists**: Define which WiFi networks use your local URL
 - **Flexible Connection Modes**: Auto, Internal-only, or External-only options
 - **Optimized Video Playback**: Hardware-accelerated WebView with WebRTC support
-- **Reliability Enhancements**: Automatic recovery from crashes and network changes
-- **URL Validation**: Connectivity verification before switching connections
+- **Stability**: Automatic recovery from network changes
 - **Internal SSL Support**: Self-signed certificates accepted for internal URLs only
 
 ## Permissions
