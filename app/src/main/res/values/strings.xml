@@ -45,4 +45,19 @@
         <item>internal</item>
         <item>external</item>
     </string-array>
+    
+    <!-- Download location arrays -->
+    <string-array name="download_location_entries">
+        <item>Downloads/Frigate</item>
+        <item>Pictures (Gallery)</item>
+        <item>Movies (Gallery)</item>
+        <item>Downloads (Root)</item>
+    </string-array>
+    
+    <string-array name="download_location_values">
+        <item>downloads</item>
+        <item>pictures</item>
+        <item>movies</item>
+        <item>downloads_root</item>
+    </string-array>
 </resources>

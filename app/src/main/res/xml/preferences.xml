@@ -71,6 +71,21 @@
     </PreferenceCategory>
     
     <PreferenceCategory
+        android:title="Downloads"
+        app:iconSpaceReserved="false">
+        
+        <ListPreference
+            android:key="download_location"
+            android:title="Download Location"
+            android:summary="Choose where to save downloaded videos and images"
+            android:entries="@array/download_location_entries"
+            android:entryValues="@array/download_location_values"
+            android:defaultValue="downloads"
+            app:iconSpaceReserved="false" />
+            
+    </PreferenceCategory>
+    
+    <PreferenceCategory
         android:title="Advanced"
         app:iconSpaceReserved="false">
         

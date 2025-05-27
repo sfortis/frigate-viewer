@@ -2,6 +2,7 @@ package com.asksakis.freegate
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.net.ConnectivityManager
@@ -77,6 +78,9 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         setSupportActionBar(binding.appBarMain.toolbar)
+        
+        // Handle intent if launched from custom scheme
+        handleIntent(intent)
         
         // Check and apply "Keep screen on" setting
         val prefs = PreferenceManager.getDefaultSharedPreferences(this)
@@ -542,6 +546,59 @@ class MainActivity : AppCompatActivity() {
                 // Observe URL changes only
                 networkUtils.currentUrl.observe(this) { _ ->
                     updateNetworkIndicator(navController.currentDestination)
+                }
+            }
+        }
+    }
+    
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        intent?.let { handleIntent(it) }
+    }
+    
+    private fun handleIntent(intent: Intent?) {
+        intent?.let { 
+            Log.d("MainActivity", "Intent action: ${it.action}")
+            Log.d("MainActivity", "Intent data: ${it.data}")
+            
+            // Check if launched via custom scheme
+            if (it.action == Intent.ACTION_VIEW && it.data != null) {
+                val uri = it.data
+                if (uri?.scheme == "freegate") {
+                    Log.d("MainActivity", "Launched via freegate:// scheme")
+                    
+                    // Parse the URI for specific actions
+                    val host = uri.host
+                    val path = uri.path
+                    val queryParams = uri.queryParameterNames
+                    
+                    Log.d("MainActivity", "Host: $host, Path: $path")
+                    
+                    // Handle different paths/actions
+                    when (host) {
+                        "home", "cameras" -> {
+                            // Navigate to home fragment
+                            if (::navController.isInitialized) {
+                                navController.navigate(R.id.nav_home)
+                            }
+                        }
+                        "settings" -> {
+                            // Navigate to settings
+                            if (::navController.isInitialized) {
+                                navController.navigate(R.id.nav_settings)
+                            }
+                        }
+                        "camera" -> {
+                            // Could handle specific camera with path or query param
+                            val cameraId = uri.getQueryParameter("id") ?: path?.trimStart('/')
+                            Log.d("MainActivity", "Camera ID: $cameraId")
+                            // Navigate to home and potentially pass camera ID
+                            if (::navController.isInitialized) {
+                                navController.navigate(R.id.nav_home)
+                                // TODO: Pass camera ID to HomeFragment if needed
+                            }
+                        }
+                    }
                 }
             }
         }

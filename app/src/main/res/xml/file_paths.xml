@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Access to Downloads/Frigate folder -->
+    <external-path name="frigate_downloads" path="Download/Frigate/" />
+    
+    <!-- Access to entire Downloads folder -->
+    <external-path name="downloads" path="Download/" />
+    
+    <!-- Access to Pictures/Frigate folder -->
+    <external-path name="frigate_pictures" path="Pictures/Frigate/" />
+    
+    <!-- Access to entire Pictures folder -->
+    <external-path name="pictures" path="Pictures/" />
+    
+    <!-- Access to Movies/Frigate folder -->
+    <external-path name="frigate_movies" path="Movies/Frigate/" />
+    
+    <!-- Access to entire Movies folder -->
+    <external-path name="movies" path="Movies/" />
+    
+    <!-- Access to external storage root -->
+    <external-path name="external_files" path="." />
+</paths>

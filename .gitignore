@@ -13,12 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
-
 # Additional ignores
 /app/build/
 /app/release/
 /app/debug/
-#*.apk
+*.apk
 *.aab
 *.ap_
 *.dex
@@ -28,6 +27,10 @@ local.properties
 *.keystore
 gradle.properties
 .idea/
-
 # Project-specific files
 CLAUDE.md
+
+# Ignore all .md files
+*.md
+# But keep README.md
+!README.md

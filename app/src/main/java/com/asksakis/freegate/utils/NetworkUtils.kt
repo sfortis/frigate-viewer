@@ -366,11 +366,33 @@ class NetworkUtils private constructor(private val context: Context) {
             connection.connectTimeout = VALIDATION_TIMEOUT_MS.toInt()
             connection.readTimeout = VALIDATION_TIMEOUT_MS.toInt()
             connection.requestMethod = "HEAD" // Just get headers, don't download content
-            connection.instanceFollowRedirects = true
+            connection.instanceFollowRedirects = false // Handle redirects manually to avoid loops
             
             // Set a non-empty User-Agent to avoid server rejections
             connection.setRequestProperty("User-Agent", 
                 "Mozilla/5.0 FrigateViewer/1.0 URL-Validator")
+            
+            // For HTTPS connections with self-signed certificates
+            if (connection is javax.net.ssl.HttpsURLConnection && isInternal) {
+                try {
+                    // Create trust manager that accepts all certificates for internal URLs
+                    val trustAllCerts = arrayOf<javax.net.ssl.X509TrustManager>(
+                        object : javax.net.ssl.X509TrustManager {
+                            override fun getAcceptedIssuers(): Array<java.security.cert.X509Certificate> = arrayOf()
+                            override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                            override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
+                        }
+                    )
+                    
+                    val sslContext = javax.net.ssl.SSLContext.getInstance("SSL")
+                    sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+                    
+                    connection.sslSocketFactory = sslContext.socketFactory
+                    connection.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to configure SSL for internal URL validation: ${e.message}")
+                }
+            }
             
             // Connect and check response
             val startTime = System.currentTimeMillis()
@@ -381,8 +403,18 @@ class NetworkUtils private constructor(private val context: Context) {
             
             connection.disconnect()
             
-            // Check if response is successful (2xx) or a redirect (3xx)
-            val isSuccess = (responseCode in 200..399)
+            // Check if response is successful (2xx) or acceptable redirect (3xx)
+            // For redirects, we'll consider them successful since we're not following them
+            val isSuccess = when (responseCode) {
+                in 200..299 -> true // Success
+                in 300..399 -> {
+                    // Log redirect but consider it successful
+                    val location = connection.getHeaderField("Location")
+                    Log.d(TAG, "URL redirects to: $location")
+                    true // Accept redirects as valid
+                }
+                else -> false
+            }
             
             if (isSuccess) {
                 Log.d(TAG, "URL validation successful: $url (code: $responseCode, time: ${responseTime}ms)")

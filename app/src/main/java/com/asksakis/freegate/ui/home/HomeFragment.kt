@@ -28,13 +28,28 @@ import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.DownloadListener
 import android.widget.Toast
+import android.app.DownloadManager
+import android.os.Environment
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.X509TrustManager
+import java.security.cert.X509Certificate
 import androidx.core.app.ActivityCompat
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.preference.PreferenceManager
 import com.asksakis.freegate.R
 import com.asksakis.freegate.databinding.FragmentHomeBinding
@@ -546,6 +561,7 @@ class HomeFragment : Fragment() {
                         }
                     }
                     
+                    
                     safeBinding.swipeRefresh.isRefreshing = false
                 }
                 
@@ -558,7 +574,13 @@ class HomeFragment : Fragment() {
                     val safeBinding = _binding ?: return
                     
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        Log.e(TAG, "WebView error: ${error.errorCode} - ${error.description} at ${request.url}")
+                        val url = request.url.toString()
+                        // Only log non-preview clip errors (preview clips failing is common)
+                        if (!url.contains("/clips/previews/")) {
+                            Log.e(TAG, "WebView error: ${error.errorCode} - ${error.description} at $url")
+                        } else {
+                            Log.d(TAG, "Preview clip not available: $url")
+                        }
                         safeBinding.loadingProgress.visibility = View.GONE
                         
                         // Check if it's a connection error and retry only for critical resources
@@ -721,6 +743,156 @@ class HomeFragment : Fragment() {
                 }
             }
             
+            // Setup download listener for video downloads
+            binding.webView.setDownloadListener { url, userAgent, contentDisposition, mimetype, contentLength ->
+                try {
+                    Log.d(TAG, "Download requested:")
+                    Log.d(TAG, "  URL: $url")
+                    Log.d(TAG, "  User-Agent: $userAgent")
+                    Log.d(TAG, "  Content-Disposition: $contentDisposition")
+                    Log.d(TAG, "  Mimetype: $mimetype")
+                    Log.d(TAG, "  Content-Length: $contentLength")
+                    
+                    // Check if URL needs to be adjusted (relative to absolute)
+                    var downloadUrl = url
+                    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                        // It's a relative URL, make it absolute using current page URL
+                        val currentUrl = binding.webView.url
+                        if (currentUrl != null) {
+                            val baseUrl = currentUrl.substring(0, currentUrl.indexOf('/', 8)) // Get base URL
+                            downloadUrl = baseUrl + if (url.startsWith("/")) url else "/$url"
+                            Log.d(TAG, "Converted relative URL to: $downloadUrl")
+                        }
+                    }
+                    
+                    // Extract filename from content disposition or URL
+                    var fileName = ""
+                    
+                    // Try to get filename from Content-Disposition header
+                    if (!contentDisposition.isNullOrEmpty()) {
+                        // Handle different formats: filename="file.mp4", filename*=UTF-8''file.mp4, etc.
+                        val patterns = listOf(
+                            Regex("filename\\*?=['\"]?([^'\"\\s;]+)['\"]?"),
+                            Regex("filename=([^;\\s]+)")
+                        )
+                        
+                        for (pattern in patterns) {
+                            val match = pattern.find(contentDisposition)
+                            if (match != null) {
+                                fileName = match.groupValues[1]
+                                    .replace("\"", "")
+                                    .replace("'", "")
+                                    .replace("UTF-8''", "") // Remove encoding prefix if present
+                                break
+                            }
+                        }
+                    }
+                    
+                    // If no filename from header, try to extract from URL
+                    if (fileName.isEmpty()) {
+                        val urlPath = Uri.parse(downloadUrl).path
+                        if (!urlPath.isNullOrEmpty()) {
+                            fileName = urlPath.substring(urlPath.lastIndexOf('/') + 1)
+                        }
+                    }
+                    
+                    // Clean up filename
+                    fileName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                    
+                    // If still no filename or too short, use a default based on mimetype
+                    if (fileName.isEmpty() || fileName.length < 3) {
+                        val extension = when {
+                            mimetype?.contains("video") == true -> "mp4"
+                            mimetype?.contains("image") == true -> "jpg"
+                            else -> "bin"
+                        }
+                        fileName = "frigate_${System.currentTimeMillis()}.$extension"
+                    }
+                    
+                    Log.d(TAG, "Final filename: $fileName")
+                    
+                    // Create download request
+                    val request = DownloadManager.Request(Uri.parse(downloadUrl))
+                    
+                    // Set mimetype if provided
+                    if (!mimetype.isNullOrEmpty()) {
+                        request.setMimeType(mimetype)
+                    }
+                    
+                    // Get all cookies for the domain
+                    val cookieManager = android.webkit.CookieManager.getInstance()
+                    val cookies = cookieManager.getCookie(downloadUrl)
+                    Log.d(TAG, "Cookies available: ${cookies != null}")
+                    
+                    if (cookies != null) {
+                        request.addRequestHeader("Cookie", cookies)
+                        
+                        // Also add any authorization headers if present in cookies
+                        if (cookies.contains("authToken") || cookies.contains("auth")) {
+                            Log.d(TAG, "Auth token found in cookies")
+                        }
+                    }
+                    
+                    // Add referer header (some servers check this)
+                    val currentPageUrl = binding.webView.url
+                    if (!currentPageUrl.isNullOrEmpty()) {
+                        request.addRequestHeader("Referer", currentPageUrl)
+                    }
+                    
+                    request.addRequestHeader("User-Agent", userAgent)
+                    
+                    // Configure download settings
+                    request.setTitle(fileName)
+                    request.setDescription("Downloading from Frigate")
+                    request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                    
+                    // Allow download over mobile and wifi
+                    request.setAllowedNetworkTypes(
+                        DownloadManager.Request.NETWORK_WIFI or DownloadManager.Request.NETWORK_MOBILE
+                    )
+                    
+                    // Set destination based on user preference
+                    val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+                    val downloadLocation = prefs.getString("download_location", "downloads") ?: "downloads"
+                    when (downloadLocation) {
+                        "pictures" -> request.setDestinationInExternalPublicDir(Environment.DIRECTORY_PICTURES, "Frigate/$fileName")
+                        "movies" -> request.setDestinationInExternalPublicDir(Environment.DIRECTORY_MOVIES, "Frigate/$fileName")
+                        "downloads_root" -> request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                        else -> request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "Frigate/$fileName")
+                    }
+                    
+                    // Check if this is an internal/local URL (likely self-signed cert)
+                    val isInternalUrl = downloadUrl.contains(".local") || 
+                                      downloadUrl.contains(".lan") ||
+                                      downloadUrl.startsWith("https://192.168.") ||
+                                      downloadUrl.startsWith("https://10.") ||
+                                      downloadUrl.startsWith("https://172.") ||
+                                      downloadUrl.startsWith("http://192.168.") ||
+                                      downloadUrl.startsWith("http://10.") ||
+                                      downloadUrl.startsWith("http://172.")
+                    
+                    if (isInternalUrl) {
+                        Log.d(TAG, "Internal URL detected, using alternative download method")
+                        // Use alternative download method for self-signed certificates
+                        downloadFileDirectly(downloadUrl, fileName, cookies, userAgent)
+                    } else {
+                        // Use standard DownloadManager for external URLs
+                        val downloadManager = requireContext().getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+                        val downloadId = downloadManager.enqueue(request)
+                        
+                        Toast.makeText(context, "Downloading $fileName...", Toast.LENGTH_LONG).show()
+                        Log.d(TAG, "Download enqueued with ID: $downloadId")
+                        
+                        // Monitor download progress
+                        monitorDownload(downloadId, fileName)
+                    }
+                    
+                } catch (e: Exception) {
+                    Log.e(TAG, "Download failed: ${e.message}", e)
+                    Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+            
             // Configure WebView settings
             // Wrap everything in try-catch to avoid crashes on resume
             try {
@@ -740,9 +912,9 @@ class HomeFragment : Fragment() {
                 // Memory & cache settings - allow caching for video content
                 webSettings.cacheMode = WebSettings.LOAD_DEFAULT
                 
-                // Navigation settings
-                webSettings.setSupportZoom(true)
-                webSettings.builtInZoomControls = true
+                // Navigation settings - disable zoom
+                webSettings.setSupportZoom(false)
+                webSettings.builtInZoomControls = false
                 webSettings.displayZoomControls = false
                 webSettings.loadWithOverviewMode = true
                 webSettings.useWideViewPort = true
@@ -1025,6 +1197,267 @@ class HomeFragment : Fragment() {
     /**
      * Setup back press handling
      */
+    private fun downloadFileDirectly(url: String, fileName: String, cookies: String?, userAgent: String) {
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    // Create trust manager that accepts all certificates
+                    val trustAllCerts = arrayOf<X509TrustManager>(object : X509TrustManager {
+                        override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+                        override fun checkClientTrusted(chain: Array<X509Certificate>, authType: String) {}
+                        override fun checkServerTrusted(chain: Array<X509Certificate>, authType: String) {}
+                    })
+                    
+                    // Install the all-trusting trust manager
+                    val sslContext = SSLContext.getInstance("SSL")
+                    sslContext.init(null, trustAllCerts, java.security.SecureRandom())
+                    
+                    // Create connection
+                    val connection = URL(url).openConnection() as HttpURLConnection
+                    
+                    if (connection is HttpsURLConnection) {
+                        connection.sslSocketFactory = sslContext.socketFactory
+                        connection.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true }
+                    }
+                    
+                    // Set headers
+                    connection.setRequestProperty("User-Agent", userAgent)
+                    if (!cookies.isNullOrEmpty()) {
+                        connection.setRequestProperty("Cookie", cookies)
+                    }
+                    connection.connectTimeout = 30000
+                    connection.readTimeout = 30000
+                    
+                    // Connect
+                    connection.connect()
+                    
+                    val responseCode = connection.responseCode
+                    Log.d(TAG, "Direct download response code: $responseCode")
+                    
+                    if (responseCode == HttpURLConnection.HTTP_OK) {
+                        val fileSize = connection.contentLength
+                        
+                        // Get download location from preferences
+                        val prefs = PreferenceManager.getDefaultSharedPreferences(context!!)
+                        val downloadLocation = prefs.getString("download_location", "downloads") ?: "downloads"
+                        
+                        val file = when (downloadLocation) {
+                            "pictures" -> {
+                                val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                                val frigateDir = File(picturesDir, "Frigate")
+                                if (!frigateDir.exists()) frigateDir.mkdirs()
+                                File(frigateDir, fileName)
+                            }
+                            "movies" -> {
+                                val moviesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
+                                val frigateDir = File(moviesDir, "Frigate")
+                                if (!frigateDir.exists()) frigateDir.mkdirs()
+                                File(frigateDir, fileName)
+                            }
+                            "downloads_root" -> {
+                                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                File(downloadsDir, fileName)
+                            }
+                            else -> {
+                                val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                                val frigateDir = File(downloadsDir, "Frigate")
+                                if (!frigateDir.exists()) frigateDir.mkdirs()
+                                File(frigateDir, fileName)
+                            }
+                        }
+                        
+                        withContext(Dispatchers.Main) {
+                            Toast.makeText(context, "Downloading $fileName...", Toast.LENGTH_SHORT).show()
+                        }
+                        
+                        // Download file
+                        connection.inputStream.use { input ->
+                            FileOutputStream(file).use { output ->
+                                val buffer = ByteArray(4096)
+                                var bytesRead: Int
+                                var totalBytesRead = 0L
+                                
+                                while (input.read(buffer).also { bytesRead = it } != -1) {
+                                    output.write(buffer, 0, bytesRead)
+                                    totalBytesRead += bytesRead
+                                    
+                                    // Update progress (optional)
+                                    if (fileSize > 0) {
+                                        val progress = (totalBytesRead * 100 / fileSize).toInt()
+                                        if (progress % 10 == 0) {
+                                            Log.d(TAG, "Download progress: $progress%")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Notify media scanner (use MediaScannerConnection for newer API)
+                        context?.let { ctx ->
+                            android.media.MediaScannerConnection.scanFile(
+                                ctx,
+                                arrayOf(file.absolutePath),
+                                arrayOf(null),
+                                null
+                            )
+                        }
+                        
+                        withContext(Dispatchers.Main) {
+                            // Show completion toast with option to open
+                            val snackbar = com.google.android.material.snackbar.Snackbar.make(
+                                binding.root,
+                                "Downloaded: $fileName",
+                                com.google.android.material.snackbar.Snackbar.LENGTH_LONG
+                            )
+                            
+                            // Add action to open the file
+                            snackbar.setAction("Open") {
+                                openDownloadedFile(file)
+                            }
+                            
+                            snackbar.show()
+                            Log.d(TAG, "File downloaded successfully: ${file.absolutePath}")
+                        }
+                    } else {
+                        throw Exception("Server returned code: $responseCode")
+                    }
+                    
+                    connection.disconnect()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Direct download failed: ${e.message}", e)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+    
+    private fun monitorDownload(downloadId: Long, fileName: String) {
+        // Monitor download status in background
+        val handler = android.os.Handler(android.os.Looper.getMainLooper())
+        handler.postDelayed(object : Runnable {
+            override fun run() {
+                val downloadManager = context?.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager
+                if (downloadManager != null) {
+                    val query = DownloadManager.Query().setFilterById(downloadId)
+                    val cursor = downloadManager.query(query)
+                    
+                    if (cursor.moveToFirst()) {
+                        val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                        val reasonIndex = cursor.getColumnIndex(DownloadManager.COLUMN_REASON)
+                        
+                        if (statusIndex >= 0) {
+                            when (cursor.getInt(statusIndex)) {
+                                DownloadManager.STATUS_SUCCESSFUL -> {
+                                    Log.d(TAG, "Download completed: $fileName")
+                                    
+                                    // Get the downloaded file URI
+                                    val uriIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_URI)
+                                    if (uriIndex >= 0) {
+                                        val downloadedUri = cursor.getString(uriIndex)
+                                        val file = if (downloadedUri.startsWith("file://")) {
+                                            File(Uri.parse(downloadedUri).path ?: "")
+                                        } else {
+                                            // Get the file based on download location preference
+                                            val prefs = PreferenceManager.getDefaultSharedPreferences(context!!)
+                                            val downloadLocation = prefs.getString("download_location", "downloads") ?: "downloads"
+                                            when (downloadLocation) {
+                                                "pictures" -> File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "Frigate/$fileName")
+                                                "movies" -> File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "Frigate/$fileName")
+                                                "downloads_root" -> File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), fileName)
+                                                else -> File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Frigate/$fileName")
+                                            }
+                                        }
+                                        
+                                        if (file.exists()) {
+                                            // Show snackbar with open option
+                                            com.google.android.material.snackbar.Snackbar.make(
+                                                binding.root,
+                                                "Downloaded: $fileName",
+                                                com.google.android.material.snackbar.Snackbar.LENGTH_LONG
+                                            ).setAction("Open") {
+                                                openDownloadedFile(file)
+                                            }.show()
+                                        } else {
+                                            Toast.makeText(context, "Downloaded: $fileName", Toast.LENGTH_SHORT).show()
+                                        }
+                                    } else {
+                                        Toast.makeText(context, "Downloaded: $fileName", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                DownloadManager.STATUS_FAILED -> {
+                                    val reason = if (reasonIndex >= 0) cursor.getInt(reasonIndex) else -1
+                                    val errorMsg = when (reason) {
+                                        DownloadManager.ERROR_CANNOT_RESUME -> "Cannot resume download"
+                                        DownloadManager.ERROR_DEVICE_NOT_FOUND -> "Storage not found"
+                                        DownloadManager.ERROR_FILE_ALREADY_EXISTS -> "File already exists"
+                                        DownloadManager.ERROR_FILE_ERROR -> "File error"
+                                        DownloadManager.ERROR_HTTP_DATA_ERROR -> "HTTP data error"
+                                        DownloadManager.ERROR_INSUFFICIENT_SPACE -> "Insufficient space"
+                                        DownloadManager.ERROR_TOO_MANY_REDIRECTS -> "Too many redirects"
+                                        DownloadManager.ERROR_UNHANDLED_HTTP_CODE -> "Unhandled HTTP code"
+                                        DownloadManager.ERROR_UNKNOWN -> "Unknown error"
+                                        else -> "Download failed (code: $reason)"
+                                    }
+                                    Log.e(TAG, "Download failed: $errorMsg")
+                                    Toast.makeText(context, "Download failed: $errorMsg", Toast.LENGTH_LONG).show()
+                                }
+                                DownloadManager.STATUS_RUNNING, DownloadManager.STATUS_PENDING -> {
+                                    // Still downloading, check again later
+                                    handler.postDelayed(this, 1000)
+                                }
+                            }
+                        }
+                    }
+                    cursor.close()
+                }
+            }
+        }, 1000)
+    }
+    
+    private fun openDownloadedFile(file: File) {
+        try {
+            val mimeType = when {
+                file.name.endsWith(".mp4", true) -> "video/mp4"
+                file.name.endsWith(".avi", true) -> "video/x-msvideo"
+                file.name.endsWith(".mov", true) -> "video/quicktime"
+                file.name.endsWith(".mkv", true) -> "video/x-matroska"
+                file.name.endsWith(".jpg", true) || file.name.endsWith(".jpeg", true) -> "image/jpeg"
+                file.name.endsWith(".png", true) -> "image/png"
+                else -> "video/*"
+            }
+            
+            // Create intent to open the file
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                // Use FileProvider for Android N+ to avoid FileUriExposedException
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    androidx.core.content.FileProvider.getUriForFile(
+                        requireContext(),
+                        "${requireContext().packageName}.fileprovider",
+                        file
+                    )
+                } else {
+                    Uri.fromFile(file)
+                }
+                
+                setDataAndType(uri, mimeType)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            
+            // Check if there's an app to handle this intent
+            if (intent.resolveActivity(requireContext().packageManager) != null) {
+                startActivity(intent)
+            } else {
+                Toast.makeText(context, "No app found to open this file", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error opening file: ${e.message}")
+            Toast.makeText(context, "Error opening file: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
     private fun setupBackButtonHandler() {
         val callback = object : androidx.activity.OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
