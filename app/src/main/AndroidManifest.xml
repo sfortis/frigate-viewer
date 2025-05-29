@@ -22,6 +22,9 @@
     <!-- Storage permission for downloads (not needed on Android 10+) -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" 
                      android:maxSdkVersion="28" />
+    
+    <!-- Permission to install packages -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:allowBackup="true"

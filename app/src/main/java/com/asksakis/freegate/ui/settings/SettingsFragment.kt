@@ -37,6 +37,11 @@ import com.asksakis.freegate.R
 import androidx.navigation.fragment.findNavController
 import com.asksakis.freegate.utils.NetworkUtils
 import com.asksakis.freegate.utils.WifiNetworkManager
+import com.asksakis.freegate.utils.UpdateChecker
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import android.widget.ProgressBar
 // NetworkFixer has been consolidated into NetworkUtils
 
 class SettingsFragment : PreferenceFragmentCompat() {
@@ -913,6 +918,74 @@ class SettingsFragment : PreferenceFragmentCompat() {
                 "User Agent updated. The page will reload with new settings.", 
                 Toast.LENGTH_SHORT).show()
             true
+        }
+        
+        // Display current app version
+        val appVersionPref = findPreference<Preference>("app_version")
+        appVersionPref?.summary = getAppVersion()
+        
+        // Handle check for updates
+        findPreference<Preference>("check_updates")?.setOnPreferenceClickListener {
+            checkForUpdatesManually()
+            true
+        }
+    }
+    
+    /**
+     * Get the current app version
+     */
+    private fun getAppVersion(): String {
+        return try {
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                requireContext().packageManager.getPackageInfo(
+                    requireContext().packageName,
+                    android.content.pm.PackageManager.PackageInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                requireContext().packageManager.getPackageInfo(requireContext().packageName, 0)
+            }
+            packageInfo.versionName ?: "Unknown"
+        } catch (e: Exception) {
+            "Unknown"
+        }
+    }
+    
+    /**
+     * Manually check for app updates
+     */
+    private fun checkForUpdatesManually() {
+        val updateChecker = UpdateChecker(requireContext())
+        
+        // Create a progress dialog
+        val progressBar = ProgressBar(context).apply {
+            isIndeterminate = true
+            setPadding(0, 16, 0, 0)
+        }
+        
+        val layout = android.widget.LinearLayout(context).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(50, 40, 50, 40)
+            addView(progressBar)
+        }
+        
+        val progressDialog = AlertDialog.Builder(requireContext())
+            .setTitle("Checking for updates...")
+            .setView(layout)
+            .setCancelable(false)
+            .create()
+        
+        progressDialog.show()
+        
+        lifecycleScope.launch {
+            val updateInfo = updateChecker.checkForUpdates(force = true)
+            progressDialog.dismiss()
+            
+            if (updateInfo != null) {
+                updateChecker.showUpdateDialog(requireActivity() as AppCompatActivity, updateInfo)
+            } else {
+                Toast.makeText(context, "No updates available", Toast.LENGTH_SHORT).show()
+            }
         }
     }
     
