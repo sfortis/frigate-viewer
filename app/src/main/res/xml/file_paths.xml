@@ -20,4 +20,7 @@
     
     <!-- Access to external storage root -->
     <external-path name="external_files" path="." />
+    
+    <!-- Cache path for updates -->
+    <cache-path name="updates" path="." />
 </paths>

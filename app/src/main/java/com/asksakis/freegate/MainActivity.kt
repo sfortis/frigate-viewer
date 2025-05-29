@@ -33,9 +33,12 @@ import androidx.preference.PreferenceManager
 import com.asksakis.freegate.databinding.ActivityMainBinding
 // NetworkFixer has been consolidated into NetworkUtils
 import com.asksakis.freegate.utils.NetworkUtils
+import com.asksakis.freegate.utils.UpdateChecker
 import com.google.android.material.navigation.NavigationView
 import com.google.android.material.snackbar.Snackbar
 import android.widget.Toast
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
@@ -116,11 +119,6 @@ class MainActivity : AppCompatActivity() {
         // This is critical for WiFi detection to work
         requestRequiredPermissions()
         
-        // For Android 11+, we need to add the device to the local network device filter
-        // This is not actually needed for WiFi detection - we use NetworkUtils instead
-        /*if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            registerLocalNetworkRequest()
-        }*/
         
         // Show a message about why we need permissions only if we don't have them
         if (!hasRequiredPermissions()) {
@@ -167,6 +165,9 @@ class MainActivity : AppCompatActivity() {
             // Fragment is not ready yet, we'll set it up in onPostCreate
             Log.d("MainActivity", "NavHostFragment not ready yet")
         }
+        
+        // Check for updates on app start
+        checkForUpdates()
     }
     
     /**
@@ -247,75 +248,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
-    /**
-     * Register a network request to get SSID of the connected Wi-Fi network for Android 11+
-     * This helps resolve the <unknown ssid> issue on newer Android versions
-     * NOTE: This is not actually needed - we use NetworkUtils for network detection
-     */
-    /*private fun registerLocalNetworkRequest() {
-        try {
-            val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-            
-            // Create a request for WiFi networks
-            val request = NetworkRequest.Builder()
-                .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
-                .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) // Local networks may not have internet
-                .build()
-                
-            // Create a callback to handle network changes with location info flag on Android 12+
-            val networkCallback = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                object : ConnectivityManager.NetworkCallback(
-                    ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO
-                ) {
-                    override fun onAvailable(network: Network) {
-                        super.onAvailable(network)
-                        android.util.Log.d("MainActivity", "Local network available with location info")
-                        
-                        // Bind to the network briefly to improve SSID access
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            connectivityManager.bindProcessToNetwork(network)
-                            connectivityManager.bindProcessToNetwork(null) // Unbind after briefly binding
-                        }
-                    }
-                    
-                    override fun onLost(network: Network) {
-                        super.onLost(network)
-                        android.util.Log.d("MainActivity", "Local network lost")
-                    }
-                    
-                    override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
-                        super.onCapabilitiesChanged(network, capabilities)
-                        android.util.Log.d("MainActivity", "Network capabilities changed")  
-                    }
-                }
-            } else {
-                object : ConnectivityManager.NetworkCallback() {
-                    override fun onAvailable(network: Network) {
-                        super.onAvailable(network)
-                        android.util.Log.d("MainActivity", "Local network available")
-                        
-                        // Bind to the network briefly to improve SSID access
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                            connectivityManager.bindProcessToNetwork(network)
-                            connectivityManager.bindProcessToNetwork(null) // Unbind after briefly binding
-                        }
-                    }
-                    
-                    override fun onLost(network: Network) {
-                        super.onLost(network)
-                        android.util.Log.d("MainActivity", "Local network lost")
-                    }
-                }
-            }
-            
-            // Register the request with the callback
-            connectivityManager.requestNetwork(request, networkCallback)
-            
-            android.util.Log.d("MainActivity", "Registered local network request for WiFi SSID access")
-        } catch (e: Exception) {
-            android.util.Log.e("MainActivity", "Error registering local network request: ${e.message}")
-        }
-    }*/
     
     /**
      * Check if we have the required permissions based on Android version
@@ -600,6 +532,19 @@ class MainActivity : AppCompatActivity() {
                         }
                     }
                 }
+            }
+        }
+    }
+    
+    /**
+     * Check for app updates from GitHub
+     */
+    private fun checkForUpdates() {
+        val updateChecker = UpdateChecker(this)
+        lifecycleScope.launch {
+            val updateInfo = updateChecker.checkForUpdates()
+            updateInfo?.let {
+                updateChecker.showUpdateDialog(this@MainActivity, it)
             }
         }
     }

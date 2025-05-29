@@ -108,6 +108,19 @@
             android:dependency="use_custom_user_agent"
             app:iconSpaceReserved="false" />
             
+        <Preference
+            android:key="app_version"
+            android:title="App Version"
+            android:summary="1.0"
+            android:enabled="false"
+            app:iconSpaceReserved="false" />
+            
+        <Preference
+            android:key="check_updates"
+            android:title="Check for Updates"
+            android:summary="Check for new versions of the app"
+            app:iconSpaceReserved="false" />
+            
     </PreferenceCategory>
 
 </PreferenceScreen>
