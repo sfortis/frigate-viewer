@@ -33,4 +33,4 @@ CLAUDE.md
 # Ignore all .md files
 *.md
 # But keep README.md
-!README.md
+!README.mdrelease_changelog.md
