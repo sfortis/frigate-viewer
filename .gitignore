@@ -29,8 +29,10 @@ gradle.properties
 .idea/
 # Project-specific files
 CLAUDE.md
+.claude/
+*.backup
 
 # Ignore all .md files
 *.md
 # But keep README.md
-!README.mdrelease_changelog.md
+!README.md
