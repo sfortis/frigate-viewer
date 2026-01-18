@@ -16,6 +16,7 @@ A seamless Android client for Frigate NVR that intelligently switches between lo
 - **Optimized Video Playback**: Hardware-accelerated WebView with WebRTC support
 - **Stability**: Automatic recovery from network changes
 - **Internal SSL Support**: Self-signed certificates accepted for internal URLs only
+- **mTLS Support**: Client certificate authentication for secure environments
 - **Video/Image Downloads**: Save clips and snapshots with configurable storage location
 - **Deep Linking**: Launch app via `freegate://` URLs for integration with other apps
 
