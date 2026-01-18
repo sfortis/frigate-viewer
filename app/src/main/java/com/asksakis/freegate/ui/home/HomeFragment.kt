@@ -43,6 +43,9 @@ import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
 import java.security.cert.X509Certificate
+import java.security.PrivateKey
+import android.security.KeyChain
+import android.webkit.ClientCertRequest
 import androidx.core.app.ActivityCompat
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
@@ -71,6 +74,9 @@ class HomeFragment : Fragment() {
     private var customView: View? = null
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var wasSystemBarsVisible: Boolean = true
+
+    // mTLS client certificate alias (cached during session)
+    private var clientCertAlias: String? = null
     
     companion object {
         private const val TAG = "HomeFragment"
@@ -400,7 +406,42 @@ class HomeFragment : Fragment() {
                     Log.w(TAG, "SSL error occurred: $primaryError for URL: ${error?.url} - proceeding anyway")
                     handler?.proceed()
                 }
-                
+
+                override fun onReceivedClientCertRequest(view: WebView?, request: ClientCertRequest?) {
+                    Log.i(TAG, "Client certificate requested by ${request?.host}")
+
+                    // If we have a saved alias, use it
+                    if (clientCertAlias != null) {
+                        provideClientCertificate(request, clientCertAlias!!)
+                        return
+                    }
+
+                    // Prompt user to select certificate
+                    activity?.let { act ->
+                        KeyChain.choosePrivateKeyAlias(
+                            act,
+                            { alias ->
+                                if (alias != null) {
+                                    Log.i(TAG, "User selected certificate: $alias")
+                                    clientCertAlias = alias
+                                    provideClientCertificate(request, alias)
+                                } else {
+                                    Log.w(TAG, "No certificate selected")
+                                    request?.cancel()
+                                }
+                            },
+                            request?.keyTypes,
+                            request?.principals,
+                            request?.host,
+                            request?.port ?: -1,
+                            null
+                        )
+                    } ?: run {
+                        Log.e(TAG, "Activity not available for certificate selection")
+                        request?.cancel()
+                    }
+                }
+
                 @Deprecated("Deprecated in Java")
                 override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                     Log.d(TAG, "shouldOverrideUrlLoading: $url")
@@ -1627,7 +1668,7 @@ class HomeFragment : Fragment() {
     private fun showSystemBars() {
         activity?.window?.let { window ->
             if (!wasSystemBarsVisible) return // Don't restore if they weren't visible
-            
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 // Modern API for Android 11+ (API 30+)
                 WindowCompat.setDecorFitsSystemWindows(window, true)
@@ -1638,5 +1679,29 @@ class HomeFragment : Fragment() {
                 window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
             }
         }
+    }
+
+    /**
+     * Provide client certificate for mTLS authentication
+     */
+    private fun provideClientCertificate(request: ClientCertRequest?, alias: String) {
+        Thread {
+            try {
+                val ctx = context ?: return@Thread
+                val privateKey: PrivateKey? = KeyChain.getPrivateKey(ctx, alias)
+                val certificateChain: Array<X509Certificate>? = KeyChain.getCertificateChain(ctx, alias)
+
+                if (privateKey != null && certificateChain != null) {
+                    Log.i(TAG, "Providing client certificate: $alias")
+                    request?.proceed(privateKey, certificateChain)
+                } else {
+                    Log.e(TAG, "Failed to get certificate or private key")
+                    request?.cancel()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error providing client certificate", e)
+                request?.cancel()
+            }
+        }.start()
     }
 }
