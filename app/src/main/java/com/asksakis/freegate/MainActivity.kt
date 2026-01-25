@@ -562,7 +562,8 @@ class MainActivity : AppCompatActivity() {
     private fun checkForUpdates() {
         val updateChecker = UpdateChecker(this)
         lifecycleScope.launch {
-            val updateInfo = updateChecker.checkForUpdates()
+            // Force check on app launch
+            val updateInfo = updateChecker.checkForUpdates(force = true)
             updateInfo?.let {
                 updateChecker.showUpdateDialog(this@MainActivity, it)
             }

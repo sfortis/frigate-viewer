@@ -1202,20 +1202,20 @@ class HomeFragment : Fragment() {
                     safeBinding.webView.run {
                         // Clear everything possible
                         clearHistory()
-                        clearCache(true)
                         clearFormData()
                         clearSslPreferences()
-                        
-                        // Load a blank page to reset state
-                        loadUrl("about:blank")
                     }
-                    
-                    // Set a timestamp that invalidates any pending loads
-                    lastUrlChangeTime = System.currentTimeMillis()
-                    
-                    // Refresh network status to get latest URL
-                    homeViewModel.refreshStatus()
-                    
+
+                    // Get current URL and reload directly (bypass debouncing)
+                    val currentUrl = networkUtils.currentUrl.value
+                    if (currentUrl != null) {
+                        safeBinding.webView.loadUrl(currentUrl)
+                        currentLoadedUrl = currentUrl
+                    } else {
+                        // Fallback to refreshing network status
+                        homeViewModel.refreshStatus()
+                    }
+
                     // Determine network mode (internal vs external)
                     val isHomeNetwork = networkUtils.isHome()
                     
