@@ -132,8 +132,19 @@ class HomeFragment : Fragment() {
                     return@observe
                 }
                 
-                // Early exit if this is the same URL we already requested (except for mode switches)
-                if (url == lastRequestedUrl && !isSignificantModeSwitch) {
+                // On significant mode switch (INT<->EXT), always force reload
+                if (isSignificantModeSwitch) {
+                    Log.d(TAG, "Network mode switch detected - forcing reload")
+                    binding.loadingProgress.visibility = View.VISIBLE
+                    binding.webView.loadUrl(url)
+                    currentLoadedUrl = url
+                    lastRequestedUrl = url
+                    lastUrlChangeTime = currentTime
+                    return@observe
+                }
+
+                // Early exit if this is the same URL we already requested
+                if (url == lastRequestedUrl) {
                     Log.d(TAG, "Ignoring duplicate URL request: $url")
                     return@observe
                 }
@@ -222,10 +233,16 @@ class HomeFragment : Fragment() {
                 NetworkUtils.ValidationStatus.FAILED, NetworkUtils.ValidationStatus.TIMEOUT -> {
                     Log.d(TAG, "URL validation failed: ${result.url} - ${result.message}")
                     networkValidationInProgress = false
-                    
-                    // Don't show any toasts for validation failures to reduce noise
-                    // Users will notice if the page doesn't load anyway
-                    
+
+                    // Show toast with error message
+                    val errorMsg = when {
+                        result.message?.contains("resolve host") == true -> "DNS error - cannot resolve host"
+                        result.message?.contains("403") == true -> "Access denied (403)"
+                        result.message?.contains("timeout", ignoreCase = true) == true -> "Connection timeout"
+                        else -> "Connection failed"
+                    }
+                    Toast.makeText(context, errorMsg, Toast.LENGTH_SHORT).show()
+
                     // Hide loading indicator if present
                     if (binding.loadingProgress.visibility == View.VISIBLE) {
                         binding.loadingProgress.visibility = View.GONE
@@ -308,16 +325,16 @@ class HomeFragment : Fragment() {
      */
     private fun isInternalToExternalSwitch(newUrl: String): Boolean {
         val localCurrentUrl = currentLoadedUrl ?: return false
-        
-        // Detect internal URL (.local, http://, IP addresses)
-        val isCurrentInternal = localCurrentUrl.contains(".local") || 
+
+        // Detect internal URL (.local, http://, or any IP address including https)
+        val isCurrentInternal = localCurrentUrl.contains(".local") ||
                                !localCurrentUrl.contains("https://") ||
-                               localCurrentUrl.matches(Regex("http://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
-                                
-        // Detect external URL (https:// and not .local)
-        val isNewExternal = newUrl.contains("https://") && 
+                               localCurrentUrl.matches(Regex("https?://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
+
+        // Detect external URL (https:// domain, not .local and not IP address)
+        val isNewExternal = newUrl.contains("https://") &&
                            !newUrl.contains(".local") &&
-                           !newUrl.matches(Regex("https://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
+                           !newUrl.matches(Regex("https?://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
         
         // Critical switch pattern: internal -> external
         val isSwitch = isCurrentInternal && isNewExternal
@@ -335,16 +352,16 @@ class HomeFragment : Fragment() {
      */
     private fun isExternalToInternalSwitch(newUrl: String): Boolean {
         val localCurrentUrl = currentLoadedUrl ?: return false
-        
-        // Detect external URL (https:// and not .local)
-        val isCurrentExternal = localCurrentUrl.contains("https://") && 
+
+        // Detect external URL (https:// domain, not .local and not IP address)
+        val isCurrentExternal = localCurrentUrl.contains("https://") &&
                               !localCurrentUrl.contains(".local") &&
-                              !localCurrentUrl.matches(Regex("https://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
-                                
-        // Detect internal URL (.local, http://, IP addresses)
-        val isNewInternal = newUrl.contains(".local") || 
+                              !localCurrentUrl.matches(Regex("https?://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
+
+        // Detect internal URL (.local, http://, or any IP address including https)
+        val isNewInternal = newUrl.contains(".local") ||
                           !newUrl.contains("https://") ||
-                          newUrl.matches(Regex("http://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
+                          newUrl.matches(Regex("https?://\\d+\\.\\d+\\.\\d+\\.\\d+.*"))
         
         // Critical switch pattern: external -> internal
         val isSwitch = isCurrentExternal && isNewInternal
