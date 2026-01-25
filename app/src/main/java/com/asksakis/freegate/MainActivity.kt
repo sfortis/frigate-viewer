@@ -151,7 +151,27 @@ class MainActivity : AppCompatActivity() {
             )
             setupActionBarWithNavController(navController, appBarConfiguration)
             navView.setupWithNavController(navController)
-            
+
+            // Handle custom menu items (like Refresh)
+            navView.setNavigationItemSelectedListener { menuItem ->
+                when (menuItem.itemId) {
+                    R.id.nav_refresh -> {
+                        // Get HomeFragment and refresh WebView
+                        val navHostFragment = supportFragmentManager.findFragmentById(R.id.nav_host_fragment_content_main) as? NavHostFragment
+                        val homeFragment = navHostFragment?.childFragmentManager?.fragments?.firstOrNull { it is com.asksakis.freegate.ui.home.HomeFragment } as? com.asksakis.freegate.ui.home.HomeFragment
+                        homeFragment?.forceNetworkRefresh()
+                        binding.drawerLayout.closeDrawer(GravityCompat.START)
+                        true
+                    }
+                    else -> {
+                        // Let NavigationUI handle other items
+                        val handled = androidx.navigation.ui.NavigationUI.onNavDestinationSelected(menuItem, navController)
+                        if (handled) binding.drawerLayout.closeDrawer(GravityCompat.START)
+                        handled
+                    }
+                }
+            }
+
             // Setup navigation listener to update the network indicator
             navController.addOnDestinationChangedListener { _, destination, _ ->
                 updateNetworkIndicator(destination)

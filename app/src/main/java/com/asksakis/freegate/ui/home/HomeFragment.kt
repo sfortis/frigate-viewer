@@ -75,11 +75,12 @@ class HomeFragment : Fragment() {
     private var customViewCallback: WebChromeClient.CustomViewCallback? = null
     private var wasSystemBarsVisible: Boolean = true
 
-    // mTLS client certificate alias (cached during session)
+    // mTLS client certificate alias (persisted across sessions)
     private var clientCertAlias: String? = null
-    
+
     companion object {
         private const val TAG = "HomeFragment"
+        private const val PREF_CLIENT_CERT_ALIAS = "client_cert_alias"
     }
 
     override fun onCreateView(
@@ -89,6 +90,10 @@ class HomeFragment : Fragment() {
     ): View {
         homeViewModel = ViewModelProvider(this)[HomeViewModel::class.java]
         networkUtils = NetworkUtils.getInstance(requireContext())
+
+        // Load persisted certificate alias
+        val prefs = PreferenceManager.getDefaultSharedPreferences(requireContext())
+        clientCertAlias = prefs.getString(PREF_CLIENT_CERT_ALIAS, null)
         
         _binding = FragmentHomeBinding.inflate(inflater, container, false)
         val root: View = binding.root
@@ -163,12 +168,11 @@ class HomeFragment : Fragment() {
                     // This is critical for user experience
                     if (isSignificantModeSwitch) {
                         Log.d(TAG, "Significant mode switch detected - forcing immediate reload")
-                        
+
                         // Show loading indicator
                         binding.loadingProgress.visibility = View.VISIBLE
-                        
-                        // Clear WebView cache and cookies for a clean reload
-                        binding.webView.clearCache(true)
+
+                        // Note: Don't clear cache/cookies to preserve authentication
                         
                         // Show toast message for URL switches - these are the only toasts we want to keep
                         if (isInternalToExternalSwitch(url)) {
@@ -382,9 +386,16 @@ class HomeFragment : Fragment() {
     private fun setupWebView() {
         // Avoid any setup if binding is null
         if (_binding == null) return
-        
+
         // Make sure we're not double-initializing
         try {
+            // Enable cookie persistence for authentication across network changes
+            val cookieManager = android.webkit.CookieManager.getInstance()
+            cookieManager.setAcceptCookie(true)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                cookieManager.setAcceptThirdPartyCookies(binding.webView, true)
+            }
+
             // Safer initialization for WebView
             binding.webView.webViewClient = object : WebViewClient() {
                 override fun onReceivedSslError(
@@ -424,6 +435,11 @@ class HomeFragment : Fragment() {
                                 if (alias != null) {
                                     Log.i(TAG, "User selected certificate: $alias")
                                     clientCertAlias = alias
+                                    // Persist the alias for future sessions
+                                    PreferenceManager.getDefaultSharedPreferences(act)
+                                        .edit()
+                                        .putString(PREF_CLIENT_CERT_ALIAS, alias)
+                                        .apply()
                                     provideClientCertificate(request, alias)
                                 } else {
                                     Log.w(TAG, "No certificate selected")
@@ -434,7 +450,7 @@ class HomeFragment : Fragment() {
                             request?.principals,
                             request?.host,
                             request?.port ?: -1,
-                            null
+                            clientCertAlias  // Pre-select previously used certificate
                         )
                     } ?: run {
                         Log.e(TAG, "Activity not available for certificate selection")
@@ -643,6 +659,14 @@ class HomeFragment : Fragment() {
                             
                             if (isMainFrameError) {
                                 Log.d(TAG, "Critical page-loading error, refreshing network status")
+
+                                // If SSL handshake failed and we have a saved certificate, it might be expired/invalid
+                                if (error.errorCode == WebViewClient.ERROR_FAILED_SSL_HANDSHAKE && clientCertAlias != null) {
+                                    Log.w(TAG, "SSL handshake failed with saved certificate - clearing alias for re-selection")
+                                    clearSavedCertificateAlias()
+                                    Toast.makeText(context, "Certificate rejected - please select a new one", Toast.LENGTH_LONG).show()
+                                }
+
                                 // Trigger a network refresh which will reload the appropriate URL
                                 homeViewModel.refreshStatus()
                             }
@@ -1574,8 +1598,13 @@ class HomeFragment : Fragment() {
     
     override fun onPause() {
         super.onPause()
-        
+
         try {
+            // Flush cookies to persist authentication across network changes
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                android.webkit.CookieManager.getInstance().flush()
+            }
+
             // Use a safer approach to pausing WebView
             _binding?.let { safeBinding ->
                 safeBinding.webView.onPause()
@@ -1583,7 +1612,7 @@ class HomeFragment : Fragment() {
         } catch (e: Exception) {
             Log.e(TAG, "Error pausing WebView: ${e.message}")
         }
-        
+
         // Don't clear cache or force GC in onPause as this can cause renderer crashes
         // during fragment transitions
     }
@@ -1695,13 +1724,64 @@ class HomeFragment : Fragment() {
                     Log.i(TAG, "Providing client certificate: $alias")
                     request?.proceed(privateKey, certificateChain)
                 } else {
-                    Log.e(TAG, "Failed to get certificate or private key")
-                    request?.cancel()
+                    Log.e(TAG, "Failed to get certificate or private key - clearing saved alias")
+                    clearSavedCertificateAlias()
+                    // Prompt user to select a new certificate
+                    activity?.runOnUiThread {
+                        promptForNewCertificate(request)
+                    }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error providing client certificate", e)
-                request?.cancel()
+                Log.e(TAG, "Error providing client certificate - clearing saved alias", e)
+                clearSavedCertificateAlias()
+                // Prompt user to select a new certificate
+                activity?.runOnUiThread {
+                    promptForNewCertificate(request)
+                }
             }
         }.start()
+    }
+
+    /**
+     * Clear saved certificate alias when it's no longer valid
+     */
+    private fun clearSavedCertificateAlias() {
+        clientCertAlias = null
+        context?.let { ctx ->
+            PreferenceManager.getDefaultSharedPreferences(ctx)
+                .edit()
+                .remove(PREF_CLIENT_CERT_ALIAS)
+                .apply()
+        }
+    }
+
+    /**
+     * Prompt user to select a new certificate
+     */
+    private fun promptForNewCertificate(request: ClientCertRequest?) {
+        activity?.let { act ->
+            KeyChain.choosePrivateKeyAlias(
+                act,
+                { alias ->
+                    if (alias != null) {
+                        Log.i(TAG, "User selected new certificate: $alias")
+                        clientCertAlias = alias
+                        PreferenceManager.getDefaultSharedPreferences(act)
+                            .edit()
+                            .putString(PREF_CLIENT_CERT_ALIAS, alias)
+                            .apply()
+                        provideClientCertificate(request, alias)
+                    } else {
+                        Log.w(TAG, "No certificate selected")
+                        request?.cancel()
+                    }
+                },
+                request?.keyTypes,
+                request?.principals,
+                request?.host,
+                request?.port ?: -1,
+                null
+            )
+        } ?: request?.cancel()
     }
 }

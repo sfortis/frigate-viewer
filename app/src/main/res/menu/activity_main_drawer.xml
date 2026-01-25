@@ -13,4 +13,10 @@
             android:icon="@drawable/ic_menu_settings"
             android:title="@string/menu_settings" />
     </group>
+    <group>
+        <item
+            android:id="@+id/nav_refresh"
+            android:icon="@drawable/ic_menu_refresh"
+            android:title="Refresh" />
+    </group>
 </menu>
