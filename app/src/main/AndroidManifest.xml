@@ -58,6 +58,16 @@
          otherwise OEM doze/standby kills the foreground service unpredictably. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!--
+        Exact alarms are what let the revive alarm restart the listener. An alarm that fires
+        exactly puts the app on the system's temporary allowlist, and only then is a
+        foreground service allowed to start from the background. Android 14 and later grant
+        this permission automatically to apps the user has exempted from battery
+        optimisation, which the notification setup already asks for; where it is denied the
+        alarm falls back to the inexact variant and the revive can still be refused.
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
     <application
         android:name=".FrigateViewerApp"
         android:allowBackup="true"

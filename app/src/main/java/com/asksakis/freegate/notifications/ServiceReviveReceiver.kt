@@ -42,11 +42,20 @@ class ServiceReviveReceiver : BroadcastReceiver() {
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             val pi = PendingIntent.getBroadcast(context, REQUEST_CODE, intent, flags)
             val trigger = System.currentTimeMillis() + delayMs
+            // Exact matters here for a reason that has nothing to do with timing accuracy.
+            // A firing exact alarm puts the app on the system's temporary allowlist, which
+            // is what permits the receiver to start the foreground service. The inexact
+            // variant wakes the device and grants nothing, so Android refuses the start and
+            // the revive is lost (see FrigateAlertService.updateForContext). The user can
+            // deny the permission, so the inexact call stays as the fallback.
+            val exactAllowed = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                am.canScheduleExactAlarms()
             runCatching {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi)
+                if (exactAllowed) {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi)
                 } else {
-                    am.set(AlarmManager.RTC_WAKEUP, trigger, pi)
+                    Log.w(TAG, "Exact alarms not permitted; the revive may be refused")
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, trigger, pi)
                 }
             }.onFailure { Log.w(TAG, "Could not schedule alarm: ${it.message}") }
         }
