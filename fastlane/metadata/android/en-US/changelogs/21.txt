@@ -1,5 +1,3 @@
-# 2.13
-
 * Turning on notifications now asks for the permissions it needs one at a time, instead of stacking dialogs on top of each other
 * Alert notifications come back on their own after the app updates, not only after a reboot
 * The background health check that restarts a dropped listener can no longer be refused by Android
