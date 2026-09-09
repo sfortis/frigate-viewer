@@ -1,11 +1,13 @@
 package com.asksakis.freegate.ui.settings
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.AlertDialog
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -107,6 +109,7 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
 
         setupDndBypassPreference()
         setupBatteryOptimizationPreference()
+        setupExactAlarmPreference()
         setupOemBackgroundPreference()
         setupLastAlertPreference()
         setupDiagnosticsPreference()
@@ -123,6 +126,11 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
         refreshFilterSummaries()
         refreshLastAlertSummary()
         refreshDndBypassSummary()
+        // Both of these read a system permission that the user may have just changed on a
+        // settings screen. Re-running the setup rebinds the summary and the visibility; the
+        // delayed refresh at the tap site cannot know how long the user spent there.
+        setupBatteryOptimizationPreference()
+        setupExactAlarmPreference()
     }
 
     private fun refreshFilterSummaries() {
@@ -206,7 +214,10 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
     private fun setupDndBypassPreference() {
         val pref = findPreference<Preference>("dnd_bypass") ?: return
         pref.setOnPreferenceClickListener {
-            openDndAccessSettings()
+            // Through the dialog rather than straight to the system screen. Android has no
+            // per-app screen for this permission, only the list of every app that has asked
+            // for it, so the user needs to be told what to look for before they get there.
+            maybePromptDndAccess(autoPrompt = false)
             true
         }
         refreshDndBypassSummary()
@@ -230,10 +241,12 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
                 if (autoPrompt)
                     "Phylax can ring alerts at alarm volume even while Do Not " +
                         "Disturb is on, so you don't miss a real event overnight. " +
-                        "Grant Do Not Disturb access?"
+                        "Android opens a list of every app that can ask for this, so find " +
+                        "Phylax there and turn it on."
                 else
                     "Grant Phylax permission to override Do Not Disturb so alerts " +
-                        "ring at alarm volume?"
+                        "ring at alarm volume? Android opens a list of every app that " +
+                        "can ask for this, so find Phylax there and turn it on."
             )
             .setPositiveButton("Open settings") { _, _ ->
                 prefs?.edit()?.putBoolean("dnd_prompted", true)?.apply()
@@ -278,6 +291,38 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
         refresh()
         pref.setOnPreferenceClickListener {
             maybePromptBatteryOptimization(autoPrompt = false)
+            view?.postDelayed({ refresh() }, 1_500)
+            true
+        }
+    }
+
+    /**
+     * Exact alarms are what let the revive alarm restart the listener from the background,
+     * because a firing exact alarm puts the app on the system's temporary allowlist. Android
+     * grants the permission on its own to apps the user has exempted from battery
+     * optimisation, so this row appears only for the users who are still missing it, and it
+     * disappears once it is granted or once the exemption covers it.
+     */
+    private fun setupExactAlarmPreference() {
+        val pref = findPreference<Preference>("exact_alarms") ?: return
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            pref.isVisible = false
+            return
+        }
+        fun refresh() {
+            val am = requireContext().getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+            pref.isVisible = am?.canScheduleExactAlarms() == false
+        }
+        refresh()
+        pref.setOnPreferenceClickListener {
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                .setData(Uri.parse("package:${requireContext().packageName}"))
+            runCatching { startActivity(intent) }
+                .onFailure {
+                    // Some OEM builds do not carry the per-app screen. The general settings
+                    // page is a worse landing spot but still gets the user there.
+                    runCatching { startActivity(Intent(Settings.ACTION_SETTINGS)) }
+                }
             view?.postDelayed({ refresh() }, 1_500)
             true
         }

@@ -166,6 +166,13 @@
             android:dependency="notifications_enabled" />
 
         <Preference
+            android:key="exact_alarms"
+            android:icon="@drawable/ic_notif_battery"
+            android:title="Alarms and reminders"
+            android:summary="Lets the five-minute check restart the listener"
+            android:dependency="notifications_enabled" />
+
+        <Preference
             android:key="oem_background_restrictions"
             android:icon="@drawable/ic_notif_oem"
             android:title="Background restrictions"
