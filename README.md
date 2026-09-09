@@ -68,9 +68,14 @@ Phylax makes your self-hosted Frigate NVR feel like a proper mobile app.
 
 <!-- Updated from WHATSNEW.md in the release preparation commit, alongside the version bump. -->
 
-Version 2.12:
+Version 2.13:
 
-* Notifications with a client certificate recover on their own when the certificate was not readable yet as the app started
+* Turning on notifications now asks for the permissions it needs one at a time, instead of stacking dialogs on top of each other
+* Alert notifications come back on their own after the app updates, not only after a reboot
+* The background health check that restarts a dropped listener can no longer be refused by Android
+* Frigate served under a base path, for example /frigate, now loads
+* The reliability settings show whether alarms and reminders are granted, and the Do Not Disturb row opens the system list on Phylax
+* Shared debug logs record only the session cookie's attributes, never its value
 
 Every release is listed on the [Releases page](https://github.com/sfortis/phylax/releases).
 

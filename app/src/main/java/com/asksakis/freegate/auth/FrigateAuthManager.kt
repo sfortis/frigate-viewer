@@ -192,7 +192,11 @@ class FrigateAuthManager private constructor(context: Context) {
         val cookieLine = rawSetCookie ?: "frigate_token=$token; Path=/"
         cm.setCookie(baseUrl, cookieLine)
         cm.flush()
-        Log.d(TAG, "Installed frigate_token into WebView CookieManager for $baseUrl (raw=${cookieLine.take(80)}…)")
+        // The attributes are what mattered when a re-emitted cookie was rejected, so they
+        // stay. The value never appears: this line reaches shared log bundles, and a session
+        // token is the one thing in them that could let someone in.
+        val attributes = cookieLine.substringAfter(';', "").trim().ifEmpty { "none" }
+        Log.d(TAG, "Installed frigate_token for $baseUrl (attributes: $attributes)")
     }
 
     companion object {

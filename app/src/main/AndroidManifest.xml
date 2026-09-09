@@ -58,6 +58,16 @@
          otherwise OEM doze/standby kills the foreground service unpredictably. -->
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
+    <!--
+        Exact alarms are what let the revive alarm restart the listener. An alarm that fires
+        exactly puts the app on the system's temporary allowlist, and only then is a
+        foreground service allowed to start from the background. Android 14 and later grant
+        this permission automatically to apps the user has exempted from battery
+        optimisation, which the notification setup already asks for; where it is denied the
+        alarm falls back to the inexact variant and the revive can still be refused.
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
     <application
         android:name=".FrigateViewerApp"
         android:allowBackup="true"
@@ -126,7 +136,16 @@
             android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <!--
+                    An app update stops the service and nothing brings it back until the user
+                    opens the app, because a background start is refused for an app that is
+                    not exempt from battery optimisation. This broadcast is one of the
+                    exemptions, so the listener returns on its own after an update.
+                    LOCKED_BOOT_COMPLETED is deliberately absent: it only reaches a
+                    directBootAware receiver, and at that point the encrypted storage that
+                    holds the settings is not readable anyway.
+                -->
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
