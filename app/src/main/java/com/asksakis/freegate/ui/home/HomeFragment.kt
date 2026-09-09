@@ -61,6 +61,16 @@ class HomeFragment : Fragment() {
     /** Lazy RECORD_AUDIO request, fired the first time the page asks for the mic. */
     private lateinit var micPermissionLauncher: ActivityResultLauncher<String>
 
+    /**
+     * The reliability walkthrough that follows the one-time "enable alerts" offer. Do Not
+     * Disturb access is left out here: alerts arrive without it, and the first run is not
+     * the moment to ask for a permission the user has no reason for yet. The dedicated row
+     * in Settings, Notifications offers it.
+     */
+    private val notificationOnboarding by lazy {
+        com.asksakis.freegate.ui.NotificationOnboarding(this, includeDnd = false)
+    }
+
     /** POST_NOTIFICATIONS request for the one-time post-setup "enable alerts" offer. */
     private lateinit var notifPermissionLauncher: ActivityResultLauncher<String>
 
@@ -493,8 +503,9 @@ class HomeFragment : Fragment() {
     /**
      * Turn on Alert notifications and bring the listener service up. Alerts default on
      * and Detections stay off (the user opts into the noisier stream in Settings).
-     * Enabling straight from here deliberately skips the DND / battery-optimization
-     * prompts that Settings shows, keeping this a single, quiet action.
+     * The battery-optimisation exemption is offered right after, because the listener
+     * does not survive without it. Do Not Disturb access is left to the Settings screen,
+     * so enabling from here stays a short sequence.
      */
     private fun enableAlertNotifications() {
         if (!isAdded) return
@@ -507,38 +518,7 @@ class HomeFragment : Fragment() {
         com.asksakis.freegate.notifications.FrigateAlertService
             .updateForContext(requireContext(), forceRestart = true)
         Toast.makeText(context, "Alert notifications enabled", Toast.LENGTH_SHORT).show()
-        promptBatteryOptimizationForNotifications(prefs)
-    }
-
-    /**
-     * Notification-reliability boundary: Android can silently kill the background WS
-     * listener under battery optimization, so right after enabling alerts we offer the
-     * exemption. Reuses [BatteryOptHelper] and the same `battery_opt_prompted` flag as
-     * the Settings screen, so the user is never asked twice. DND access is intentionally
-     * left to Settings to keep this a single, light prompt.
-     */
-    private fun promptBatteryOptimizationForNotifications(
-        prefs: android.content.SharedPreferences,
-    ) {
-        val ctx = context ?: return
-        if (com.asksakis.freegate.notifications.BatteryOptHelper.isIgnoringOptimizations(ctx)) {
-            prefs.edit().putBoolean("battery_opt_prompted", true).apply()
-            return
-        }
-        com.asksakis.freegate.ui.FreegateDialogs.builder(ctx)
-            .setTitle("Keep notifications reliable")
-            .setMessage(
-                "Android may silently kill the background listener after a while. Allow " +
-                    "Phylax to bypass battery optimization so alerts arrive reliably?"
-            )
-            .setPositiveButton("Allow") { _, _ ->
-                com.asksakis.freegate.notifications.BatteryOptHelper.requestIgnore(ctx)
-                prefs.edit().putBoolean("battery_opt_prompted", true).apply()
-            }
-            .setNegativeButton("Not now") { _, _ ->
-                prefs.edit().putBoolean("battery_opt_prompted", true).apply()
-            }
-            .show()
+        notificationOnboarding.start()
     }
 
     /**
@@ -1959,6 +1939,8 @@ class HomeFragment : Fragment() {
         // This ensures any URL changes made in settings are applied
         homeViewModel.refreshStatus()
         applyAudioMode()
+        // Continue the reliability walkthrough if the user is back from a system screen.
+        notificationOnboarding.onResume()
         Log.d(TAG, "HomeFragment resumed - refreshing network status to get latest URL")
         reloadIfActiveServerChanged()
 

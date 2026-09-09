@@ -18,6 +18,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.findNavController
 import androidx.preference.Preference
 import androidx.preference.PreferenceFragmentCompat
+import androidx.preference.SwitchPreferenceCompat
 import com.asksakis.freegate.R
 import com.asksakis.freegate.auth.CredentialsStore
 import com.asksakis.freegate.notifications.AlarmSoundPlayer
@@ -31,6 +32,7 @@ import com.asksakis.freegate.notifications.MotionSoundPlayer
 import kotlinx.coroutines.Dispatchers
 import com.asksakis.freegate.notifications.OemSettingsIntents
 import com.asksakis.freegate.notifications.ServiceLifecycleLog
+import com.asksakis.freegate.ui.NotificationOnboarding
 import com.asksakis.freegate.utils.NetworkUtils
 import kotlinx.coroutines.launch
 
@@ -60,19 +62,20 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
             if (key == "notifications_enabled" &&
                 prefs.getBoolean("notifications_enabled", false)
             ) {
-                // Feature boundary: enabling alerts is when we ask for the notification
-                // permission (Android 13+). Without it, FrigateNotifier silently drops
-                // every alert - so request it here rather than at app launch.
-                maybeRequestNotificationPermission()
-                if (!prefs.getBoolean("battery_opt_prompted", false)) {
-                    maybePromptBatteryOptimization(autoPrompt = true)
-                }
-                // DND access is independent of battery optimisation: prompt
-                // unconditionally on first enable so the alarm-stream override
-                // can actually take effect.
-                maybePromptDndAccess(autoPrompt = true)
+                // Feature boundary: enabling alerts is when we ask for everything the
+                // background listener needs. Without POST_NOTIFICATIONS (Android 13+)
+                // FrigateNotifier silently drops every alert, so it is requested here
+                // rather than at app launch.
+                beginFirstEnableOnboarding()
             }
         }
+
+    /**
+     * The reliability walkthrough, shared with the first-run offer on Home so the two entry
+     * points ask for the same grants. This screen includes the Do Not Disturb step, which
+     * the first-run offer leaves out.
+     */
+    private val onboarding by lazy { NotificationOnboarding(this, includeDnd = true) }
 
     private val liveNotificationKeys = setOf(
         "notifications_enabled",
@@ -131,6 +134,7 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
         // delayed refresh at the tap site cannot know how long the user spent there.
         setupBatteryOptimizationPreference()
         setupExactAlarmPreference()
+        onboarding.onResume()
     }
 
     private fun refreshFilterSummaries() {
@@ -179,24 +183,39 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (!granted) {
-            Toast.makeText(
-                requireContext(),
-                "Notifications permission denied - alerts won't appear",
-                Toast.LENGTH_LONG,
-            ).show()
+        if (granted) {
+            onboarding.start()
+            return@registerForActivityResult
         }
+        // Nothing the listener posts can reach the user without this permission, so the
+        // switch goes back off instead of advertising a feature that cannot work. Writing
+        // the preference back also stops the service, through the change listener above.
+        onboarding.cancel()
+        findPreference<SwitchPreferenceCompat>("notifications_enabled")?.isChecked = false
+        Toast.makeText(
+            requireContext(),
+            "Notifications permission denied, so alerts stay off",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 
-    /** Ask for POST_NOTIFICATIONS on Android 13+ if it isn't already granted. */
-    private fun maybeRequestNotificationPermission() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        val granted = ContextCompat.checkSelfPermission(
-            requireContext(), Manifest.permission.POST_NOTIFICATIONS,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!granted) {
+    /**
+     * Ask for the notification permission, then hand over to [NotificationOnboarding] for
+     * the reliability grants. The permission goes first because without it nothing the
+     * listener posts can be shown at all.
+     */
+    private fun beginFirstEnableOnboarding() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                requireContext(), Manifest.permission.POST_NOTIFICATIONS,
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            // Nothing else is worth asking for until this one is answered, so the launcher
+            // callback is what starts the rest of the walkthrough.
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
         }
+        onboarding.start()
     }
 
     override fun onDestroy() {
@@ -214,66 +233,25 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
     private fun setupDndBypassPreference() {
         val pref = findPreference<Preference>("dnd_bypass") ?: return
         pref.setOnPreferenceClickListener {
-            // Through the dialog rather than straight to the system screen. Android has no
-            // per-app screen for this permission, only the list of every app that has asked
-            // for it, so the user needs to be told what to look for before they get there.
-            maybePromptDndAccess(autoPrompt = false)
+            val nm = requireContext()
+                .getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (nm.isNotificationPolicyAccessGranted) {
+                // Already granted, so the row is how the user reviews or withdraws it.
+                // Explaining how to grant something they have would be noise.
+                onboarding.openDndAccessSettings()
+            } else {
+                onboarding.promptDndAccess(autoPrompt = false)
+            }
             true
         }
         refreshDndBypassSummary()
-    }
-
-    /**
-     * Auto-prompt path triggered the first time the user enables notifications
-     * (or whenever they tap the dedicated DND row). Skips silently if access is
-     * already granted or if the user has dismissed the auto-prompt before.
-     */
-    private fun maybePromptDndAccess(autoPrompt: Boolean) {
-        val ctx = requireContext()
-        val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (nm.isNotificationPolicyAccessGranted) return
-        val prefs = preferenceManager.sharedPreferences
-        if (autoPrompt && prefs?.getBoolean("dnd_prompted", false) == true) return
-
-        com.asksakis.freegate.ui.FreegateDialogs.builder(ctx)
-            .setTitle("Override Do Not Disturb")
-            .setMessage(
-                if (autoPrompt)
-                    "Phylax can ring alerts at alarm volume even while Do Not " +
-                        "Disturb is on, so you don't miss a real event overnight. " +
-                        "Android opens a list of every app that can ask for this, so find " +
-                        "Phylax there and turn it on."
-                else
-                    "Grant Phylax permission to override Do Not Disturb so alerts " +
-                        "ring at alarm volume? Android opens a list of every app that " +
-                        "can ask for this, so find Phylax there and turn it on."
-            )
-            .setPositiveButton("Open settings") { _, _ ->
-                prefs?.edit()?.putBoolean("dnd_prompted", true)?.apply()
-                openDndAccessSettings()
-            }
-            .setNegativeButton("Not now") { _, _ ->
-                prefs?.edit()?.putBoolean("dnd_prompted", true)?.apply()
-            }
-            .show()
-    }
-
-    private fun openDndAccessSettings() {
-        runCatching { startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)) }
-            .onFailure {
-                Toast.makeText(
-                    requireContext(),
-                    "Unable to open DND access settings",
-                    Toast.LENGTH_SHORT,
-                ).show()
-            }
     }
 
     private fun refreshDndBypassSummary() {
         val pref = findPreference<Preference>("dnd_bypass") ?: return
         val nm = requireContext().getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         pref.summary = if (nm.isNotificationPolicyAccessGranted) {
-            "Granted — alerts ring at alarm volume even while DND is on."
+            "Granted. Alerts ring at alarm volume even while DND is on."
         } else {
             "Tap to grant Do Not Disturb access so alerts can override DND."
         }
@@ -283,14 +261,14 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
         val pref = findPreference<Preference>("battery_optimization") ?: return
         fun refresh() {
             pref.summary = if (BatteryOptHelper.isIgnoringOptimizations(requireContext())) {
-                "Exempted — the listener can run in the background."
+                "Exempted. The listener can run in the background."
             } else {
-                "Battery optimization is ON — the listener may be killed. Tap to exempt."
+                "Battery optimization is ON, so the listener may be killed. Tap to exempt."
             }
         }
         refresh()
         pref.setOnPreferenceClickListener {
-            maybePromptBatteryOptimization(autoPrompt = false)
+            onboarding.promptBatteryOptimization(autoPrompt = false)
             view?.postDelayed({ refresh() }, 1_500)
             true
         }
@@ -300,8 +278,9 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
      * Exact alarms are what let the revive alarm restart the listener from the background,
      * because a firing exact alarm puts the app on the system's temporary allowlist. Android
      * grants the permission on its own to apps the user has exempted from battery
-     * optimisation, so this row appears only for the users who are still missing it, and it
-     * disappears once it is granted or once the exemption covers it.
+     * optimisation, so most users will find it already granted. The row stays visible either
+     * way and reports the live state, like the two rows above it. It is hidden only below
+     * API 31, where the permission does not exist and there is no screen to open.
      */
     private fun setupExactAlarmPreference() {
         val pref = findPreference<Preference>("exact_alarms") ?: return
@@ -311,7 +290,12 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
         }
         fun refresh() {
             val am = requireContext().getSystemService(Context.ALARM_SERVICE) as? AlarmManager
-            pref.isVisible = am?.canScheduleExactAlarms() == false
+            pref.summary = if (am?.canScheduleExactAlarms() != false) {
+                "Granted. The five-minute check can restart the listener."
+            } else {
+                "Tap to allow alarms and reminders so the five-minute check can restart " +
+                    "the listener."
+            }
         }
         refresh()
         pref.setOnPreferenceClickListener {
@@ -326,55 +310,6 @@ class NotificationsSettingsFragment : PreferenceFragmentCompat() {
             view?.postDelayed({ refresh() }, 1_500)
             true
         }
-    }
-
-    private fun maybePromptBatteryOptimization(autoPrompt: Boolean) {
-        val ctx = requireContext()
-        if (BatteryOptHelper.isIgnoringOptimizations(ctx)) {
-            preferenceManager.sharedPreferences?.edit()
-                ?.putBoolean("battery_opt_prompted", true)?.apply()
-            // Still surface the OEM tip on first-enable devices — battery exemption
-            // alone isn't enough on Samsung / MIUI / ColorOS.
-            if (autoPrompt && OemSettingsIntents.hasCustomBackgroundSettings()) {
-                showOemReliabilityPrompt(ctx)
-            }
-            return
-        }
-
-        com.asksakis.freegate.ui.FreegateDialogs.builder(ctx)
-            .setTitle("Keep notifications reliable")
-            .setMessage(
-                if (autoPrompt)
-                    "Android may silently kill the background listener after a while. " +
-                        "Allow Phylax to bypass battery optimization so alerts arrive " +
-                        "reliably?"
-                else
-                    "Allow Phylax to bypass battery optimization?"
-            )
-            .setPositiveButton("Allow") { _, _ ->
-                BatteryOptHelper.requestIgnore(ctx)
-                preferenceManager.sharedPreferences?.edit()
-                    ?.putBoolean("battery_opt_prompted", true)?.apply()
-                // Chain to the OEM prompt — on Samsung et al, battery-opt exemption is
-                // only half the story.
-                if (OemSettingsIntents.hasCustomBackgroundSettings()) {
-                    showOemReliabilityPrompt(ctx)
-                }
-            }
-            .setNegativeButton("Not now", null)
-            .show()
-    }
-
-    private fun showOemReliabilityPrompt(ctx: android.content.Context) {
-        val oem = OemSettingsIntents.current()
-        com.asksakis.freegate.ui.FreegateDialogs.builder(ctx)
-            .setTitle("One more step on ${oem.displayName}")
-            .setMessage(OemSettingsIntents.instructionsFor(oem))
-            .setPositiveButton("Open settings") { _, _ ->
-                OemSettingsIntents.openBackgroundRestrictions(ctx)
-            }
-            .setNegativeButton("Later", null)
-            .show()
     }
 
     private fun setupZoneFilterPreference() {
