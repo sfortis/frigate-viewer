@@ -573,7 +573,27 @@ class HomeFragment : Fragment() {
             "$baseUrl/explore?event_id=${pending.eventId}"
         is com.asksakis.freegate.notifications.DeepLinkRouter.Target.MotionRecording ->
             "$baseUrl/review?timestamp=${pending.camera}_${pending.timestampSec}"
-        null -> baseUrl
+        null -> viewUrl(baseUrl)
+    }
+
+    /**
+     * The address to hand the web view for a plain server URL.
+     *
+     * A Frigate published under a base path, through `FRIGATE_BASE_PATH`, has to be opened
+     * with the trailing slash. Loaded from `https://host/frigate`, the browser resolves the
+     * page's relative asset links against `https://host/` and the interface never appears,
+     * while the API and the WebSocket keep working because those are built by appending to
+     * the trimmed URL (issue #31). The app strips trailing slashes everywhere, so a user
+     * cannot supply one themselves.
+     *
+     * A URL that already carries a query or a fragment is a page address rather than a
+     * server address, and is left exactly as it is.
+     */
+    private fun viewUrl(url: String): String {
+        val cut = url.indexOfFirst { it == '?' || it == '#' }
+        val path = if (cut < 0) url else url.substring(0, cut)
+        val rest = if (cut < 0) "" else url.substring(cut)
+        return if (path.endsWith("/")) url else "$path/$rest"
     }
 
     /** Nudge the URL observer so a staged URL actually loads after we unblock it. */
@@ -581,7 +601,7 @@ class HomeFragment : Fragment() {
         val url = networkUtils.currentUrl.value ?: return
         val web = _binding?.webView ?: return
         Log.d(TAG, "Fallback initial load: $url")
-        web.loadUrl(url)
+        web.loadUrl(viewUrl(url))
         currentLoadedUrl = url
     }
 
@@ -672,7 +692,7 @@ class HomeFragment : Fragment() {
             if (currentBase != null && currentBase == newBase && currentLoadedUrl != url) {
                 // Only the fragment changed — no reload.
                 Log.d(TAG, "Fragment-only change, navigating: $url")
-                binding.webView.loadUrl(url)
+                binding.webView.loadUrl(viewUrl(url))
                 currentLoadedEndpoint = resolved
                 return@observe
             }
@@ -685,9 +705,9 @@ class HomeFragment : Fragment() {
             // unaffected.
             val urlToLoad = if (currentLoadedUrl == null) {
                 com.asksakis.freegate.notifications.DeepLinkRouter.consumePending()
-                    ?.let { resolveDeepLinkTarget(url.trimEnd('/'), it) } ?: url
+                    ?.let { resolveDeepLinkTarget(url.trimEnd('/'), it) } ?: viewUrl(url)
             } else {
-                url
+                viewUrl(url)
             }
             if (urlToLoad != url) Log.d(TAG, "Initial load redirected to deep-link: $urlToLoad")
             loadUrlWithConnectivityCheck(urlToLoad)
@@ -724,7 +744,7 @@ class HomeFragment : Fragment() {
                     if (reloadOnValidationSuccess && !urlLoadInProgress && !target.isNullOrEmpty()) {
                         reloadOnValidationSuccess = false
                         Log.d(TAG, "Validation SUCCESS — triggering queued reload: $target")
-                        loadUrlWithConnectivityCheck(target)
+                        loadUrlWithConnectivityCheck(viewUrl(target))
                     }
                     // First successful connect right after adding a server: offer alerts.
                     maybeOfferNotifications()
@@ -1669,7 +1689,7 @@ class HomeFragment : Fragment() {
                     // Get current URL and reload directly (bypass debouncing)
                     val currentUrl = networkUtils.currentUrl.value
                     if (currentUrl != null) {
-                        safeBinding.webView.loadUrl(currentUrl)
+                        safeBinding.webView.loadUrl(viewUrl(currentUrl))
                         currentLoadedUrl = currentUrl
                     } else {
                         // Fallback to refreshing network status
@@ -1985,6 +2005,9 @@ class HomeFragment : Fragment() {
                     android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
                         // Check binding again after delay
                         if (_binding != null && isAdded) {
+                            // Reload the page that was showing, verbatim. This is a browsed
+                            // address such as /review, not a server entry, and a slash appended
+                            // here would change which document the browser asks for.
                             safeBinding.webView.loadUrl(currentLoadedUrl!!)
                         }
                     }, 100) // 100ms delay
@@ -2066,7 +2089,7 @@ class HomeFragment : Fragment() {
             // directly. If it requires auth, Frigate will redirect to /login
             // and the user can sign in from there.
             Log.d(TAG, "Loading new server (no creds path): $newUrl")
-            webView.loadUrl(newUrl)
+            webView.loadUrl(viewUrl(newUrl))
             currentLoadedUrl = newUrl
         }
     }
