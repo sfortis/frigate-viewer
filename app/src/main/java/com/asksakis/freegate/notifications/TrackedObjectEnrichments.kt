@@ -28,11 +28,16 @@ class TrackedObjectEnrichments {
      * the notification title through the same path that a name already present on the review
      * would have taken.
      */
-    data class Entry(
+    class Entry(
         val notificationId: Int,
-        var alert: AlertFilter.Alert,
-        val snapshot: Bitmap?,
-        var description: String? = null,
+        @Volatile var alert: AlertFilter.Alert,
+        /**
+         * Set once the snapshot download finishes, which is after the entry is registered.
+         * Registering first and filling this in later is deliberate: an update that arrives
+         * while the image is still downloading would otherwise find nothing to attach to.
+         */
+        @Volatile var snapshot: Bitmap? = null,
+        @Volatile var description: String? = null,
         val expiresAt: Long,
     )
 
@@ -58,27 +63,31 @@ class TrackedObjectEnrichments {
     fun register(
         alert: AlertFilter.Alert,
         notificationId: Int,
-        snapshot: Bitmap?,
         now: Long = System.currentTimeMillis(),
-    ) {
-        if (alert.detectionIds.isEmpty()) return
+    ): Entry? {
+        if (alert.detectionIds.isEmpty()) return null
         val entry = Entry(
             notificationId = notificationId,
             alert = alert,
-            snapshot = snapshot,
             expiresAt = now + EXPIRY_MS,
         )
         synchronized(lock) {
             purgeLocked(now)
             alert.detectionIds.forEach { entries[it] = entry }
             // Bitmaps are held for the lifetime of an entry, so the map is capped by count
-            // as well as by age. Oldest first, since a newer alert is the one still on
-            // screen and therefore the one worth updating.
-            while (entries.size > MAX_ENTRIES) {
-                val oldest = entries.keys.firstOrNull() ?: break
-                entries.remove(oldest)
+            // as well as by age. The cap counts notifications rather than object ids,
+            // because one review can name several objects that all point at the same
+            // notification, and evicting them one id at a time would leave an entry that
+            // answers for some of its objects and silently ignores the rest. Oldest first,
+            // since a newer alert is the one still on screen and worth updating.
+            val distinct = LinkedHashSet(entries.values)
+            while (distinct.size > MAX_ENTRIES) {
+                val oldest = distinct.first()
+                distinct.remove(oldest)
+                entries.entries.removeAll { it.value === oldest }
             }
         }
+        return entry
     }
 
     /**
@@ -137,24 +146,35 @@ class TrackedObjectEnrichments {
                 ?: envelope.optString("payload").takeIf { it.isNotEmpty() }
                     ?.let { runCatching { JSONObject(it) }.getOrNull() }
                 ?: return null
-            val eventId = payload.optString("id").takeIf { it.isNotEmpty() } ?: return null
+            // optString coerces anything non-string, a JSON null included, into its
+            // toString, so "null" and a stringified object both have to be rejected here
+            // rather than trusted as an id.
+            val eventId = payload.optString("id").takeIf { isUsable(it) } ?: return null
             return when (payload.optString("type")) {
                 "description" -> payload.optString("description")
-                    .takeIf { it.isNotEmpty() && it != "null" }
+                    .takeIf { isUsable(it) }
                     ?.let { Update.Description(eventId, it) }
 
                 "face" -> payload.optString("name")
-                    .takeIf { it.isNotEmpty() && it != "null" }
+                    .takeIf { isUsable(it) }
                     ?.takeIf { payload.optDouble("score", 0.0) >= MIN_FACE_SCORE }
                     ?.let { Update.Name(eventId, it) }
 
                 "lpr" -> payload.optString("plate")
-                    .takeIf { it.isNotEmpty() && it != "null" }
+                    .takeIf { isUsable(it) }
                     ?.let { Update.Plate(eventId, it) }
 
                 else -> null
             }
         }
+
+        /**
+         * True for a value that can be shown to the user. Rejects the empty string, the
+         * whitespace-only string, and the coerced forms of a JSON null or a structured
+         * value, none of which should ever replace text already in a notification.
+         */
+        private fun isUsable(value: String): Boolean =
+            value.isNotBlank() && value != "null" && !value.startsWith("{") && !value.startsWith("[")
 
         /**
          * Below this, Frigate has not settled on a name. Its own recognition threshold is

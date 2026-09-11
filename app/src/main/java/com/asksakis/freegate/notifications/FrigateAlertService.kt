@@ -366,14 +366,15 @@ class FrigateAlertService : Service() {
         // stands in for the thumbnail the server would have given us.
         val baseUrl = lastBaseUrl ?: resolveBaseUrl()
         if (baseUrl == null) {
-            enrichments.register(alert, alert.id.hashCode(), null)
+            enrichments.register(alert, alert.id.hashCode())
             notifier.notify(alert, tapAction())
             return
         }
+        val entry = enrichments.register(alert, alert.id.hashCode())
         scope.launch {
             val bitmap = snapshotDownloader.download(baseUrl, "/api/$camera/latest.jpg")
-            enrichments.register(alert, alert.id.hashCode(), bitmap)
-            notifier.notify(alert, tapAction(), bitmap)
+            entry?.snapshot = bitmap
+            notifier.notify(entry?.alert ?: alert, tapAction(), bitmap, entry?.description)
         }
     }
 
@@ -492,13 +493,25 @@ class FrigateAlertService : Service() {
             // Async: fetch the snapshot then post the rich notification. If it fails we
             // still post the plain notification, so a transient snapshot error never eats
             // an alert.
+            // Registered before the download, not after: an update that lands while the
+            // image is still in flight would otherwise find nothing to attach to.
+            val entry = enrichments.register(alert, alert.id.hashCode())
             scope.launch {
                 val bitmap = snapshotDownloader.download(baseUrl, path)
-                enrichments.register(alert, alert.id.hashCode(), bitmap)
-                notifier.notify(alert, tapAction(), bitmap)
+                entry?.snapshot = bitmap
+                // Post what the entry knows now, not the alert as it was before the
+                // download. An update that arrives while the image is in flight is written
+                // into the entry and cannot be posted yet, because the notification it
+                // belongs to does not exist; posting the original here would discard it.
+                notifier.notify(
+                    entry?.alert ?: alert,
+                    tapAction(),
+                    bitmap,
+                    entry?.description,
+                )
             }
         } else {
-            enrichments.register(alert, alert.id.hashCode(), null)
+            enrichments.register(alert, alert.id.hashCode())
             notifier.notify(alert, tapAction())
         }
         return true
