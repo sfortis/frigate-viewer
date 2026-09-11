@@ -13,6 +13,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.asksakis.freegate.R
+import java.util.concurrent.TimeUnit
 
 /**
  * Owns the Android notification channels for Frigate alerts and turns an [AlertFilter.Alert]
@@ -84,9 +85,10 @@ class FrigateNotifier(private val context: Context) {
             TapAction.HOME -> Intent(Intent.ACTION_VIEW, Uri.parse("frigate://home"))
         }.setPackage(context.packageName)
 
+        val notificationId = alert.id.hashCode()
         val pending = PendingIntent.getActivity(
             context,
-            alert.id.hashCode(),
+            notificationId,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -103,6 +105,7 @@ class FrigateNotifier(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setContentIntent(pending)
+        addMuteActions(builder, alert.camera, notificationId)
 
         if (snapshot != null) {
             builder.setLargeIcon(snapshot)
@@ -125,7 +128,7 @@ class FrigateNotifier(private val context: Context) {
             ContextCompat.checkSelfPermission(context, notifyPermission) ==
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
-            NotificationManagerCompat.from(context).notify(alert.id.hashCode(), builder.build())
+            NotificationManagerCompat.from(context).notify(notificationId, builder.build())
         }
     }
 
@@ -177,6 +180,7 @@ class FrigateNotifier(private val context: Context) {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setContentIntent(pending)
+        addMuteActions(builder, camera, notifId)
 
         if (snapshot != null) {
             builder.setLargeIcon(snapshot)
@@ -196,6 +200,38 @@ class FrigateNotifier(private val context: Context) {
             android.content.pm.PackageManager.PERMISSION_GRANTED
         ) {
             NotificationManagerCompat.from(context).notify(notifId, builder.build())
+        }
+    }
+
+    /**
+     * Add the buttons that silence [camera] straight from the shade.
+     *
+     * Two durations are offered because the two situations differ: a delivery at the door is
+     * over in half an hour, while mowing the lawn is not. Android shows at most three
+     * actions, so two leave room and keep the row readable.
+     *
+     * The request code mixes the camera, the notification and the duration. A shared code
+     * would let `FLAG_UPDATE_CURRENT` rewrite the extras of every pending intent that uses
+     * it, and one camera's button would then silence whichever camera alerted last.
+     */
+    private fun addMuteActions(
+        builder: NotificationCompat.Builder,
+        camera: String,
+        notificationId: Int,
+    ) {
+        MUTE_ACTION_DURATIONS.forEach { (label, durationMs) ->
+            val intent = Intent(context, NotificationActionReceiver::class.java)
+                .setAction(NotificationActionReceiver.ACTION_MUTE_CAMERA)
+                .putExtra(NotificationActionReceiver.EXTRA_CAMERA, camera)
+                .putExtra(NotificationActionReceiver.EXTRA_DURATION_MS, durationMs)
+                .putExtra(NotificationActionReceiver.EXTRA_NOTIFICATION_ID, notificationId)
+            val pending = PendingIntent.getBroadcast(
+                context,
+                "mute:$camera:$notificationId:$durationMs".hashCode(),
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            builder.addAction(R.drawable.ic_notifications_off, label, pending)
         }
     }
 
@@ -408,5 +444,15 @@ class FrigateNotifier(private val context: Context) {
         private const val CHANNEL_STATUS = "frigate_status"
         private const val REQUEST_STATUS = 1_000
         private const val REQUEST_STATUS_DELETE = 1_001
+
+        /**
+         * Durations offered on the notification's own mute buttons, in the order they
+         * appear. Both are values the mute sheet already offers, so a mute made from the
+         * shade shows up there as an ordinary entry with a countdown.
+         */
+        private val MUTE_ACTION_DURATIONS = listOf(
+            "Mute 30 min" to TimeUnit.MINUTES.toMillis(30),
+            "Mute 2 hours" to TimeUnit.HOURS.toMillis(2),
+        )
     }
 }
