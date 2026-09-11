@@ -345,7 +345,18 @@ class FrigateAlertService : Service() {
         )
         Log.d(TAG, "Debug notify: severity=${alert.severity} id=${alert.id}")
         playSoundForSeverity(alert.severity)
-        notifier.notify(alert, tapAction())
+        // Pull the camera's current frame so the debug notification looks like a real one,
+        // picture included. There is no review behind a synthetic alert, so the live frame
+        // stands in for the thumbnail the server would have given us.
+        val baseUrl = lastBaseUrl ?: resolveBaseUrl()
+        if (baseUrl == null) {
+            notifier.notify(alert, tapAction())
+            return
+        }
+        scope.launch {
+            val bitmap = snapshotDownloader.download(baseUrl, "/api/$camera/latest.jpg")
+            notifier.notify(alert, tapAction(), bitmap)
+        }
     }
 
     /**
@@ -359,7 +370,16 @@ class FrigateAlertService : Service() {
         if (NotificationManagerCompat.from(this).areNotificationsEnabled()) {
             MotionSoundPlayer.play(this)
         }
-        notifier.notifyMotion(camera, System.currentTimeMillis() / 1000L, urgent = urgent)
+        val nowSec = System.currentTimeMillis() / 1000L
+        val baseUrl = lastBaseUrl ?: resolveBaseUrl()
+        if (baseUrl == null) {
+            notifier.notifyMotion(camera, nowSec, urgent = urgent)
+            return
+        }
+        scope.launch {
+            val bitmap = snapshotDownloader.download(baseUrl, "/api/$camera/latest.jpg")
+            notifier.notifyMotion(camera, nowSec, bitmap, urgent)
+        }
     }
 
     /**
