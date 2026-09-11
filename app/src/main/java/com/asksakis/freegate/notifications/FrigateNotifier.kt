@@ -64,14 +64,27 @@ class FrigateNotifier(private val context: Context) {
             .build()
     }
 
-    /** Post a notification for [alert]. Silently ignored if POST_NOTIFICATIONS is denied. */
-    fun notify(alert: AlertFilter.Alert, tapAction: TapAction, snapshot: android.graphics.Bitmap? = null) {
+    /**
+     * Post a notification for [alert]. Silently ignored if POST_NOTIFICATIONS is denied.
+     *
+     * [description] is Frigate's own generated sentence about the object, which arrives
+     * seconds to minutes after the review. Calling this again with the same alert and a
+     * description replaces the notification in place, so it is added to the expanded view
+     * and the collapsed row is left alone: the user who has already read the headline is
+     * not shown a row that rewrites itself.
+     */
+    fun notify(
+        alert: AlertFilter.Alert,
+        tapAction: TapAction,
+        snapshot: android.graphics.Bitmap? = null,
+        description: String? = null,
+    ) {
         val channelId = when (alert.severity) {
             AlertFilter.Severity.ALERT -> CHANNEL_ALERTS
             AlertFilter.Severity.DETECTION -> CHANNEL_DETECTIONS
         }
         val title = buildTitle(alert)
-        val subtitle = buildSubtitle(alert)
+        val subtitle = buildSubtitle(alert, description)
         // Collapsed row shows the first line only; the expanded view (BigText / BigPicture
         // summary) shows the full body.
         val collapsedLine = subtitle.substringBefore('\n')
@@ -104,6 +117,10 @@ class FrigateNotifier(private val context: Context) {
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
+            // A reposted notification must not ring, vibrate or pop up a second time. The
+            // alert sound is played by AlarmSoundPlayer on the first post only, but the
+            // heads-up and the vibration belong to the channel and would repeat.
+            .setOnlyAlertOnce(true)
             .setContentIntent(pending)
         addMuteActions(builder, alert.camera, notificationId)
 
@@ -253,7 +270,7 @@ class FrigateNotifier(private val context: Context) {
      * The second line is omitted entirely if neither applies so we don't spam blank rows
      * in the shade.
      */
-    private fun buildSubtitle(alert: AlertFilter.Alert): String {
+    private fun buildSubtitle(alert: AlertFilter.Alert, description: String? = null): String {
         val severityText = if (alert.severity == AlertFilter.Severity.ALERT) "Alert" else "Detection"
         val whenText = alert.startTimeSec?.let { formatClockTime(it) }
         val primary = if (whenText == null) severityText else "$severityText • $whenText"
@@ -265,7 +282,12 @@ class FrigateNotifier(private val context: Context) {
                 .filter { it.isNotEmpty() }
             if (tags.isNotEmpty()) add(tags.joinToString(" · "))
         }
-        return if (extras.isEmpty()) primary else "$primary\n${extras.joinToString(" • ")}"
+        val lines = buildList {
+            add(primary)
+            if (extras.isNotEmpty()) add(extras.joinToString(" • "))
+            description?.takeIf { it.isNotBlank() }?.let { add(it) }
+        }
+        return lines.joinToString("\n")
     }
 
     /** Best natural-language subject for the headline, prioritising richer signals over raw labels. */
