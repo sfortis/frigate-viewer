@@ -84,10 +84,18 @@ class FrigateNotifier(private val context: Context) {
             AlertFilter.Severity.DETECTION -> CHANNEL_DETECTIONS
         }
         val title = buildTitle(alert)
-        val subtitle = buildSubtitle(alert, description)
+        val subtitle = buildSubtitle(alert)
         // Collapsed row shows the first line only; the expanded view (BigText / BigPicture
         // summary) shows the full body.
         val collapsedLine = subtitle.substringBefore('\n')
+        // A description takes the whole expanded body rather than being appended to it. The
+        // summary area of a BigPicture notification is two lines, and on a real device the
+        // severity line plus the speed and attributes line already fill both, so an appended
+        // sentence was present in the notification and never rendered. What it replaces is
+        // the least useful of the three: the time is already in the notification header, the
+        // severity is carried by the channel and the sound, and a sentence about what the
+        // object is doing usually states the speed and the attributes in passing anyway.
+        val expandedBody = description?.takeIf { it.isNotBlank() } ?: subtitle
 
         // Both alerts and detections now come from the reviews topic, so `alert.id`
         // is always a review id — route everyone to /review. (Pre-reviews-only
@@ -129,15 +137,15 @@ class FrigateNotifier(private val context: Context) {
             val bigPicture = NotificationCompat.BigPictureStyle()
                 .bigPicture(snapshot)
                 .bigLargeIcon(null as android.graphics.Bitmap?)
-                .setSummaryText(subtitle)
+                .setSummaryText(expandedBody)
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                 bigPicture.showBigPictureWhenCollapsed(true)
             }
             builder.setStyle(bigPicture)
-        } else if (subtitle.contains('\n')) {
-            // No snapshot fetched — use BigTextStyle so the expanded view still shows
-            // speed / attributes on the second line instead of truncating them away.
-            builder.setStyle(NotificationCompat.BigTextStyle().bigText(subtitle))
+        } else if (expandedBody != collapsedLine) {
+            // No snapshot fetched, so BigTextStyle carries the body instead, and unlike the
+            // picture summary it is not capped at two lines.
+            builder.setStyle(NotificationCompat.BigTextStyle().bigText(expandedBody))
         }
 
         val notifyPermission = android.Manifest.permission.POST_NOTIFICATIONS
@@ -270,7 +278,7 @@ class FrigateNotifier(private val context: Context) {
      * The second line is omitted entirely if neither applies so we don't spam blank rows
      * in the shade.
      */
-    private fun buildSubtitle(alert: AlertFilter.Alert, description: String? = null): String {
+    private fun buildSubtitle(alert: AlertFilter.Alert): String {
         val severityText = if (alert.severity == AlertFilter.Severity.ALERT) "Alert" else "Detection"
         val whenText = alert.startTimeSec?.let { formatClockTime(it) }
         val primary = if (whenText == null) severityText else "$severityText • $whenText"
@@ -282,12 +290,7 @@ class FrigateNotifier(private val context: Context) {
                 .filter { it.isNotEmpty() }
             if (tags.isNotEmpty()) add(tags.joinToString(" · "))
         }
-        val lines = buildList {
-            add(primary)
-            if (extras.isNotEmpty()) add(extras.joinToString(" • "))
-            description?.takeIf { it.isNotBlank() }?.let { add(it) }
-        }
-        return lines.joinToString("\n")
+        return if (extras.isEmpty()) primary else "$primary\n${extras.joinToString(" • ")}"
     }
 
     /** Best natural-language subject for the headline, prioritising richer signals over raw labels. */
